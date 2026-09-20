@@ -1,0 +1,28 @@
+[package]
+name = "qvole-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Relay exchange, hole punching, QUIC transport, and utilities (port of qvole internal/engine and internal/util)"
+
+[dependencies]
+qvole-spake2 = { path = "../qvole-spake2" }
+# `time` for local-offset wall-clock timestamps matching Go's time.Now().
+time = { version = "0.3", features = ["local-offset", "formatting"] }
+rand = "0.8"
+thiserror = "2"
+tokio = { version = "1", features = ["net", "time", "sync", "rt", "macros", "io-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+quinn = "0.11.11"
+rustls = "0.23.44"
+rustls-pki-types = "1.15.1"
+rustls-webpki = "0.103.15"
+rcgen = "0.14.10"
+x509-cert = "0.3.0"
+sha2 = "0.11.0"
+socket2 = "0.6"
+
+[dev-dependencies]
+ring = "0.17"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+x509-parser = { version = "0.18", features = ["verify"] }

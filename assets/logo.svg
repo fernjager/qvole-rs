@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
+  <!-- background -->
+  <circle cx="120" cy="120" r="118" fill="#eaf4e1"/>
+
+  <!-- shadow -->
+  <ellipse cx="120" cy="206" rx="62" ry="12" fill="#cde0bc"/>
+
+  <!-- tail -->
+  <path d="M168 178 q30 6 34 -18" fill="none" stroke="#b08457" stroke-width="7" stroke-linecap="round"/>
+
+  <!-- body -->
+  <ellipse cx="120" cy="150" rx="68" ry="58" fill="#a9763f"/>
+  <ellipse cx="120" cy="162" rx="48" ry="42" fill="#d9b38a"/>
+
+  <!-- feet -->
+  <ellipse cx="92" cy="202" rx="13" ry="8" fill="#8a5e2e"/>
+  <ellipse cx="148" cy="202" rx="13" ry="8" fill="#8a5e2e"/>
+
+  <!-- head -->
+  <circle cx="120" cy="92" r="56" fill="#b08457"/>
+
+  <!-- ears -->
+  <circle cx="82" cy="56" r="20" fill="#a9763f"/>
+  <circle cx="158" cy="56" r="20" fill="#a9763f"/>
+  <circle cx="82" cy="56" r="11" fill="#e6c3a0"/>
+  <circle cx="158" cy="56" r="11" fill="#e6c3a0"/>
+
+  <!-- cheeks -->
+  <circle cx="86" cy="108" r="13" fill="#f2a6a6" opacity="0.6"/>
+  <circle cx="154" cy="108" r="13" fill="#f2a6a6" opacity="0.6"/>
+
+  <!-- muzzle -->
+  <ellipse cx="120" cy="108" rx="30" ry="24" fill="#e6c3a0"/>
+
+  <!-- eyes -->
+  <circle cx="100" cy="88" r="10" fill="#3b2a1a"/>
+  <circle cx="140" cy="88" r="10" fill="#3b2a1a"/>
+  <circle cx="103" cy="85" r="3.5" fill="#fff"/>
+  <circle cx="143" cy="85" r="3.5" fill="#fff"/>
+
+  <!-- nose -->
+  <ellipse cx="120" cy="104" rx="7" ry="5" fill="#5a3825"/>
+
+  <!-- mouth -->
+  <path d="M120 109 v6 M120 115 q-7 6 -14 2 M120 115 q7 6 14 2" fill="none" stroke="#5a3825" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- whiskers -->
+  <g stroke="#8a5e2e" stroke-width="1.8" stroke-linecap="round">
+    <path d="M96 106 q-22 -3 -34 -8"/>
+    <path d="M96 112 q-22 2 -34 4"/>
+    <path d="M144 106 q22 -3 34 -8"/>
+    <path d="M144 112 q22 2 34 4"/>
+  </g>
+
+  <!-- little hands -->
+  <ellipse cx="86" cy="158" rx="11" ry="8" fill="#a9763f"/>
+  <ellipse cx="154" cy="158" rx="11" ry="8" fill="#a9763f"/>
+</svg>

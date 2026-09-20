@@ -1,0 +1,47 @@
+qvole 0.2.3: Fast tunnels over QUIC, burrowed through NATs.
+
+Commands:
+
+  pipe [--stats]                  Bidirectional stream between two peers over QUIC
+
+  tunnel                          TCP port tunneling over P2P QUIC
+    -L [laddr:]lport:raddr:rport    ...listen on local port, forward to remote addr:port (peer allows with -aF)
+    -R [raddr:]rport:laddr:lport    ...listen on remote port, forward to local addr:port (peer allows with -aL)
+    -aL addr:port                   ...allow peer to open a listening port on this addr (allow peer's -R)
+    -aF addr:port                   ...allow peer to connect to the addr:port thru you (allow peer's -L)
+    -a                              ...allow ALL peer tunnel requests (not safe)
+
+  exec                            Execute a command or connect to an exec peer
+    --cmd                           ...run command, pipe stdin/stdout to peer
+
+  relay                           Relay server (UDP)
+    --listen <addr>                ...listen address (default :9009)
+
+Common Flags (pipe / exec / tunnel):
+  --code CODE                     connection code (or $QVOLE_CODE environment var)
+  [--relay addr]                  relay server address (host:port)
+  [--debug]                       verbose debug logging to stderr
+  [--stats]                       log TX/RX throughput to stderr every 2 s (pipe-only)
+
+Examples:
+
+  # Send a file
+  alice$ qvole pipe < in                                          # prints connection code, waits for bob
+  bob$   QVOLE_CODE=CODE qvole pipe > out                         # bob connects, receiving file from alice
+
+  # Send a directory
+  alice$ tar czf - dir/ | qvole pipe                              # alice streams tar of dir/ to bob
+  bob$   QVOLE_CODE=CODE qvole pipe | tar xzf -                   # bob receives and extracts
+
+  # Port Forwarding
+  alice$ qvole tunnel -L 8080:localhost:80 -R 2222:localhost:22   # alice configures port forwarding requests
+  bob$   QVOLE_CODE=CODE qvole tunnel \
+           -aL 127.0.0.1:2222 -aF localhost:80                    # bob allowlists what alice may reach
+  alice$ curl localhost:8080                                      # alice can now reach bob's :80
+  bob$   ssh -p 2222 localhost                                    # bob can now reach alice's sshd
+
+  # Remote command (alice hosts the command, bob connects)
+  alice$ qvole exec --cmd "uptime"                                # command runs on alice, bob sees output
+  alice$ qvole exec --cmd "script -q bash /dev/null"              # alice gives bob remote shell
+  bob$   QVOLE_CODE=CODE qvole exec
+

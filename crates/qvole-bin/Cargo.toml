@@ -1,0 +1,18 @@
+[package]
+name = "qvole-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "qvole command-line binary (port of qvole cmd/qvole)"
+
+[dependencies]
+qvole-app = { path = "../qvole-app" }
+qvole-protocol = { path = "../qvole-protocol" }
+qvole-relay = { path = "../qvole-relay" }
+qvole-spake2 = { path = "../qvole-spake2" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "io-std", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[[bin]]
+name = "qvole"
+path = "src/main.rs"

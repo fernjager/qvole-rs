@@ -1,0 +1,29 @@
+[package]
+name = "qvole-spake2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SPAKE2 key agreement and shared-code handling (port of qvole spake2 package and internal/util/code.go)"
+
+[features]
+test-util = []
+
+[dependencies]
+# rand_core 0.6 is the same major version that p256/elliptic-curve depend on;
+# pinning it explicitly avoids the classic 0.6/0.9 rand_core mixing trap.
+rand_core = { version = "0.6", features = ["std"] }
+p256 = { version = "0.13", features = ["arithmetic", "expose-field"] }
+sha2 = "0.10"
+# primeorder is already in the tree via p256; referenced directly for the
+# P-256 `EQUATION_B` curve constant (cross-checked against p256's own value).
+primeorder = "0.13"
+hmac = "0.12"
+hkdf = "0.12"
+pbkdf2 = "0.12"
+aes-gcm = "0.10"
+zeroize = "1"
+thiserror = "2"
+
+[dev-dependencies]
+hex = "0.4"
+rand_core = { version = "0.6", features = ["std"] }

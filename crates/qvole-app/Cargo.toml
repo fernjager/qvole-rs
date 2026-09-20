@@ -1,0 +1,18 @@
+[package]
+name = "qvole-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Application features: pipe, exec, tunnel (port of qvole internal/app and top-level API)"
+
+[dependencies]
+qvole-protocol = { path = "../qvole-protocol" }
+qvole-spake2 = { path = "../qvole-spake2" }
+thiserror = "2"
+tokio = { version = "1", features = ["net", "time", "sync", "rt", "macros", "io-util", "io-std", "process"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+quinn = "0.11.11"
+
+[dev-dependencies]
+bytes = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

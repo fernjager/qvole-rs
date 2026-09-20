@@ -1,0 +1,21 @@
+[package]
+name = "qvole-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UDP relay server with rooms, cookies, and rate limiting (port of qvole relay package)"
+
+[dependencies]
+qvole-protocol = { path = "../qvole-protocol" }
+# Multi-consumer bounded channel for the packet queue (Go: one chan ranged by
+# N workers; flume Receiver clones share the queue).
+flume = "0.11"
+rand = "0.8"
+tokio = { version = "1", features = ["macros", "net", "time", "sync", "rt"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[features]
+test-util = []

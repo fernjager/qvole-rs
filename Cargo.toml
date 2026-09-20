@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/qvole-spake2",
+    "crates/qvole-protocol",
+    "crates/qvole-relay",
+    "crates/qvole-app",
+    "crates/qvole-bin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Dependency versions are pinned in Cargo.lock (this is a binary workspace).
+
+[profile.release]
+# Strip symbols to shrink the artifact. Build-machine path trimming
+# (`trim-paths`) is still unstable in Cargo 1.98, so the release workflow
+# remaps paths with RUSTFLAGS=--remap-path-prefix instead; see release.yml.
+strip = "debuginfo"
+

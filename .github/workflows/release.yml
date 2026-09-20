@@ -1,0 +1,74 @@
+# Release: build the qvole binary for every supported platform, attach the
+# binaries to a GitHub Release, and publish a SHA256SUMS file. Triggered by the
+# same `v*` tags as the parent Go project, whose release line this port follows
+# exactly: tag `vX.Y.Z` produces a binary that reports `qvole X.Y.Z`.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  binaries:
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64,  os: ubuntu-latest,    target: "" }
+          - { name: linux-arm64,  os: ubuntu-24.04-arm, target: "" }
+          - { name: darwin-arm64, os: macos-latest,     target: "" }
+          # Intel macOS is cross-compiled on the arm64 runner.
+          - { name: darwin-amd64, os: macos-latest,     target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Add cross target
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: |
+          # Drop build-machine paths (cargo registry, rustc sysroot) from the
+          # binary; the stable equivalent of Cargo's unstable `trim-paths`.
+          export RUSTFLAGS="--remap-path-prefix=$HOME/.cargo=/cargo --remap-path-prefix=$(rustc --print sysroot)=/rustc --remap-path-prefix=$GITHUB_WORKSPACE=/qvole"
+          version="${GITHUB_REF_NAME#v}"
+          if [ -n "${{ matrix.target }}" ]; then
+            target_flag="--target ${{ matrix.target }}"
+            bin="target/${{ matrix.target }}/release/qvole"
+          else
+            target_flag=""
+            bin="target/release/qvole"
+          fi
+          QVOLE_VERSION="$version" cargo build --release -p qvole-bin $target_flag
+          artifact="qvole-${{ matrix.name }}"
+          cp "$bin" "$artifact"
+          echo "artifact=$artifact" >> "$GITHUB_ENV"
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: qvole-${{ matrix.name }}
+          path: ${{ env.artifact }}
+
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: qvole-*
+          path: artifacts
+          merge-multiple: true
+      - run: ls -lh artifacts/
+      - name: Generate SHA256SUMS
+        run: |
+          (cd artifacts && sha256sum * > SHA256SUMS)
+          cat artifacts/SHA256SUMS
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
