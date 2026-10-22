@@ -27,8 +27,8 @@ forwarding, designed to compose with the tools you already use.
 This port is wire-compatible with the Go implementation and mirrors its layout
 module for module. It targets Linux and macOS; Windows is not supported.
 
-Initial baseline: qvole-go commit
-[`8f8ee569bbfc8ab4575ebd7094cf02fe492412e0`](https://github.com/fernjager/qvole/commit/8f8ee569bbfc8ab4575ebd7094cf02fe492412e0) (v0.2.3).
+Initial baseline: qvole-go
+[`v0.2.4`](https://github.com/fernjager/qvole/releases/tag/v0.2.4).
 
 ## Quick Start
 
@@ -186,7 +186,7 @@ serial, which is not observable under fingerprint pinning.
 
 ### Behavioral differences from the pinned Go reference
 
-As of the v0.2.3 baseline, the relay hardening, `exec` stdin half-close,
+As of the v0.2.4 baseline, the relay hardening, `exec` stdin half-close,
 `PasswordToScalar`, `pipe` stats teardown, and atomic `Debug` fixes are present
 in both implementations, so they are no longer differences.
 
@@ -220,7 +220,7 @@ value. The points below are relative to the **pinned reference commit** above.
   `#![forbid(unsafe_code)]`; Rust's type system rejects shared mutable state
   without synchronization, so a data race or a silent slice alias cannot be
   written in safe code. Go reaches the same guarantees here with atomics and
-  explicit copies (v0.2.3), but that relies on the programmer doing so.
+  explicit copies (v0.2.4), but that relies on the programmer doing so.
 - **Explicit hardening where the runtimes differ.** A dedicated stdin thread
   plus `shutdown_background()` means a finished main future never hangs on an
   uncancellable blocking read, and `flush_close()` guarantees
@@ -249,7 +249,7 @@ value. The points below are relative to the **pinned reference commit** above.
   wire change.
 - **Lockstep maintenance.** The port tracks a pinned Go commit, so protocol or
   behavior changes must be carried across both codebases by hand. At the
-  v0.2.3 baseline the two are behaviorally aligned except for the
+  v0.2.4 baseline the two are behaviorally aligned except for the
   stream-announcement asymmetry above.
 
 In short: prefer the Go implementation for cross-platform use, prebuilt

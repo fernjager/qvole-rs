@@ -22,7 +22,7 @@ jobs:
           - { name: darwin-amd64, os: macos-latest,     target: x86_64-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Add cross target
@@ -41,12 +41,12 @@ jobs:
             target_flag=""
             bin="target/release/qvole"
           fi
-          QVOLE_VERSION="$version" cargo build --release -p qvole-bin $target_flag
+          QVOLE_VERSION="$version" cargo build --release --locked -p qvole-bin $target_flag
           artifact="qvole-${{ matrix.name }}"
           cp "$bin" "$artifact"
           echo "artifact=$artifact" >> "$GITHUB_ENV"
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qvole-${{ matrix.name }}
           path: ${{ env.artifact }}
@@ -57,7 +57,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: qvole-*
           path: artifacts
@@ -68,7 +68,7 @@ jobs:
           (cd artifacts && sha256sum * > SHA256SUMS)
           cat artifacts/SHA256SUMS
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           generate_release_notes: true

@@ -1,7 +1,7 @@
 //! `qvole` command-line binary.
 //!
 //! Port of `cmd/qvole/main.go` + `cmd/qvole/signal_unix.go` (Go reference
-//! commit `8f8ee569bbfc8ab4575ebd7094cf02fe492412e0`).
+//! release v0.2.4).
 //!
 //! ## Fidelity notes
 //!
@@ -36,7 +36,7 @@ use tokio_util::sync::CancellationToken;
 /// built from. Ordinary builds and tests use the committed fallback.
 const VERSION: &str = match option_env!("QVOLE_VERSION") {
     Some(v) => v,
-    None => "0.2.3",
+    None => env!("CARGO_PKG_VERSION"),
 };
 /// Go `defaultRelayAddr`.
 const DEFAULT_RELAY_ADDR: &str = "relay.qvole.dev:9009";
@@ -1074,7 +1074,7 @@ mod tests {
 
     #[test]
     fn test_usage_matches_go_verbatim() {
-        // Byte-compare against the Go `printUsage` output (qvole 0.2.3).
+        // Byte-compare against the Go `printUsage` output (qvole 0.2.4).
         let go_usage = include_str!("usage_go.txt");
         assert_eq!(usage_text(), go_usage);
     }
@@ -1253,7 +1253,7 @@ mod tests {
         // Go: `qvole %s (protocol v%s)`, plus a `, rust port` self-identifier.
         assert_eq!(
             format!("qvole {VERSION} (protocol v{PROTOCOL_VERSION}, rust port)"),
-            "qvole 0.2.3 (protocol v0.1, rust port)"
+            "qvole 0.2.4 (protocol v0.1, rust port)"
         );
     }
 }
