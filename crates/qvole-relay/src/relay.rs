@@ -21,10 +21,20 @@ use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 
 use crate::room::{
-    DropLogLimiter, MAX_DATAGRAM_LEN, NUM_REG_SHARDS, NUM_SHARDS, PENDING_COOKIE_BYTES, PendingReg,
-    RegAction, RegShard, RoomEntry, UdpClient, evict_stale_rooms, ip_key, is_valid_hex, shard_idx,
-    trim_ascii_space, valid_room_name,
+    DropLogLimiter, MAX_DATAGRAM_LEN, NUM_REG_SHARDS, NUM_SHARDS, PENDING_COOKIE_BYTES,
+    PENDING_REG_TTL_MS, PendingReg, RegAction, RegShard, RoomEntry, UdpClient, evict_stale_rooms,
+    ip_key, is_valid_hex, shard_idx, trim_ascii_space, valid_room_name,
 };
+
+/// Count admitted clients in `entry` that share `prefix` (IPv4 exact, IPv6
+/// /64 via `ip_key`).
+fn count_prefix_clients(entry: &RoomEntry, prefix: IpAddr) -> usize {
+    entry
+        .udp_clients
+        .keys()
+        .filter(|a| ip_key(a.parse().expect("stored addr is valid")) == prefix)
+        .count()
+}
 
 /// Inbound read buffer size (Go `readBufSize`).
 pub const READ_BUF_SIZE: usize = 1500;
@@ -56,6 +66,10 @@ const DEFAULT_MAX_PENDING_PER_IP: i64 = 50;
 const DEFAULT_REG_RATE: i64 = 10;
 /// Global cap on pre-cookie pending registrations.
 const DEFAULT_MAX_PENDING_GLOBAL: i64 = 65_536;
+/// Per-room cap on in-room pending registrations.
+const DEFAULT_MAX_PENDING_PER_ROOM: i64 = 256;
+/// Per-prefix admitted-client cap per room (IPv6 grouped by /64).
+const DEFAULT_MAX_CLIENTS_PER_PREFIX_PER_ROOM: i64 = 4;
 
 /// Relay configuration (Go: package globals initialized in `init()`).
 #[derive(Debug, Clone)]
@@ -78,6 +92,11 @@ pub struct Config {
     /// Global pre-cookie pending store bound (Go `maxPendingGlobal` +
     /// `QVOLE_RELAY_MAX_PENDING`).
     pub max_pending_global: i64,
+    /// Per-room in-room pending cap (Go `maxPendingPerRoom`).
+    pub max_pending_per_room: i64,
+    /// Per-prefix admitted-client cap per room
+    /// (Go `maxClientsPerPrefixPerRoom`).
+    pub max_clients_per_prefix_per_room: i64,
 }
 
 impl Default for Config {
@@ -105,6 +124,8 @@ impl Config {
             max_clients_hard: DEFAULT_MAX_CLIENTS_HARD,
             max_pending_per_ip: DEFAULT_MAX_PENDING_PER_IP,
             max_pending_global: DEFAULT_MAX_PENDING_GLOBAL,
+            max_pending_per_room: DEFAULT_MAX_PENDING_PER_ROOM,
+            max_clients_per_prefix_per_room: DEFAULT_MAX_CLIENTS_PER_PREFIX_PER_ROOM,
         }
     }
 
@@ -143,6 +164,14 @@ impl Config {
             max_clients_hard: env_int("QVOLE_RELAY_MAX_CLIENTS_HARD", d.max_clients_hard),
             max_pending_per_ip: env_int("QVOLE_RELAY_MAX_PENDING_PER_IP", d.max_pending_per_ip),
             max_pending_global: env_int("QVOLE_RELAY_MAX_PENDING", d.max_pending_global),
+            max_pending_per_room: env_int(
+                "QVOLE_RELAY_MAX_PENDING_PER_ROOM",
+                d.max_pending_per_room,
+            ),
+            max_clients_per_prefix_per_room: env_int(
+                "QVOLE_RELAY_MAX_CLIENTS_PER_PREFIX_PER_ROOM",
+                d.max_clients_per_prefix_per_room,
+            ),
         }
     }
 }
@@ -191,6 +220,8 @@ pub struct Relay {
     reg_ttl_ms: AtomicU64,
     max_pending_per_ip: AtomicUsize,
     max_pending_global: AtomicUsize,
+    max_pending_per_room: AtomicUsize,
+    max_clients_per_prefix_per_room: AtomicUsize,
     /// Bounded outbound-write semaphore; `None` in tests (direct writes,
     /// mirroring Go's nil `writePool`), set by [`Relay::run`] in production.
     write_pool: OnceLock<Arc<tokio::sync::Semaphore>>,
@@ -216,6 +247,8 @@ impl Relay {
         let max_pending_per_ip = cfg.max_pending_per_ip as usize;
         let max_reg_rate = cfg.max_reg_rate as usize;
         let max_pending_global = cfg.max_pending_global as usize;
+        let max_pending_per_room = cfg.max_pending_per_room as usize;
+        let max_clients_per_prefix_per_room = cfg.max_clients_per_prefix_per_room as usize;
         Self {
             cfg,
             shards: (0..NUM_SHARDS)
@@ -248,6 +281,8 @@ impl Relay {
             reg_ttl_ms: AtomicU64::new(reg_ttl_ms),
             max_pending_per_ip: AtomicUsize::new(max_pending_per_ip),
             max_pending_global: AtomicUsize::new(max_pending_global),
+            max_pending_per_room: AtomicUsize::new(max_pending_per_room),
+            max_clients_per_prefix_per_room: AtomicUsize::new(max_clients_per_prefix_per_room),
             write_pool: OnceLock::new(),
         }
     }
@@ -280,6 +315,12 @@ impl Relay {
     }
     fn max_pending_global(&self) -> usize {
         self.max_pending_global.load(Ordering::Relaxed)
+    }
+    fn max_pending_per_room(&self) -> usize {
+        self.max_pending_per_room.load(Ordering::Relaxed)
+    }
+    fn max_clients_per_prefix_per_room(&self) -> usize {
+        self.max_clients_per_prefix_per_room.load(Ordering::Relaxed)
     }
 
     /// Total live rooms (Go `totalRooms()`).
@@ -497,11 +538,13 @@ impl Relay {
     fn drop_packet(&self, src: SocketAddr, msg: &str) {
         self.stat_drops.fetch_add(1, Ordering::Relaxed);
         let ip = ip_key(src).to_string();
-        let mut lim = self.drop_log_limiter.lock().expect("drop limiter poisoned");
-        if !lim.allow(&ip, DROP_LOG_INTERVAL) {
-            return;
+        let allowed = {
+            let mut lim = self.drop_log_limiter.lock().expect("drop limiter poisoned");
+            lim.allow(&ip, DROP_LOG_INTERVAL)
+        };
+        if allowed {
+            LOG_RELAY.printf_warn(msg);
         }
-        LOG_RELAY.printf_warn(msg);
     }
 
     /// Env-gated trace logging: enabled when `QVOLE_RELAY_TRACE` is set.
@@ -539,12 +582,23 @@ impl Relay {
         }
     }
 
+    fn log_write_error(&self, src: SocketAddr, msg: &str) {
+        let ip = ip_key(src).to_string();
+        let allowed = {
+            let mut lim = self.drop_log_limiter.lock().expect("drop limiter poisoned");
+            lim.allow(&ip, DROP_LOG_INTERVAL)
+        };
+        if allowed {
+            LOG_RELAY.printf_warn(msg);
+        }
+    }
+
     /// Port of `sendREGD`: `REGD {room} OK {src}\n`.
     async fn send_regd(&self, sock: &UdpSocket, room: &str, src: SocketAddr) {
         let msg = format!("REGD {room} OK {src}\n");
         Self::rtrace(&format!("REGD OK -> {src} room={room}"));
         if let Err(e) = self.write_relay(sock, msg.as_bytes(), src).await {
-            LOG_RELAY.printf_warn(&format!("REGD write to {src} failed: {e}"));
+            self.log_write_error(src, &format!("REGD write to {src} failed: {e}"));
         }
     }
 
@@ -559,7 +613,7 @@ impl Relay {
         let msg = format!("REGD {room} {}\n", to_hex_lower(cookie));
         Self::rtrace(&format!("REGD challenge -> {src} room={room}"));
         if let Err(e) = self.write_relay(sock, msg.as_bytes(), src).await {
-            LOG_RELAY.printf_warn(&format!("REGD challenge write to {src} failed: {e}"));
+            self.log_write_error(src, &format!("REGD challenge write to {src} failed: {e}"));
         }
     }
 
@@ -629,6 +683,13 @@ impl Relay {
         ));
         let src_ip = ip_key(src);
 
+        // Rate-limit every REG shape, including cookie completion and
+        // re-registration (Go: moved to the top of handleReg).
+        if self.is_reg_rate_limited(&src_ip.to_string()) {
+            self.drop_packet(src, &format!("Rate-limited REG from {src_str}"));
+            return;
+        }
+
         if !cookie.is_empty() {
             // Follow-up REG carrying a cookie.
             if !is_valid_hex(cookie) || cookie.len() != PENDING_COOKIE_BYTES * 2 {
@@ -657,6 +718,16 @@ impl Relay {
                         src,
                         &format!(
                             "Dropped REG with mismatched cookie from {src_str} in room {room} (pending store)"
+                        ),
+                    );
+                    return;
+                }
+                if pend.created_at.elapsed() > Duration::from_millis(PENDING_REG_TTL_MS) {
+                    self.delete_pending_reg(room, &src_str);
+                    self.drop_packet(
+                        src,
+                        &format!(
+                            "Dropped expired cookie from {src_str} in room {room} (pending store)"
                         ),
                     );
                     return;
@@ -691,10 +762,6 @@ impl Relay {
                 None => {
                     // The pending registration expired or was evicted.
                     // Re-issue a fresh challenge instead of dropping.
-                    if self.is_reg_rate_limited(&src.to_string()) {
-                        self.drop_packet(src, &format!("Rate-limited REG from {src_str}"));
-                        return;
-                    }
                     if self.count_ip_rooms(src_ip) >= self.max_rooms_per_ip() {
                         self.drop_packet(src, &format!("Room limit per IP reached for {src_str}"));
                         return;
@@ -749,66 +816,97 @@ impl Relay {
                                 RegAction::None
                             }
                             Some(pend) => {
-                                // Capture the resolved address before eviction
-                                // can invalidate the matched pending entry.
-                                let resolved = pend.resolved_addr;
-                                // Evict stale clients before the cap checks so a
-                                // valid cookie completion is not rejected because
-                                // of long-idle clients.
-                                for (ip, r) in
-                                    entry.remove_stale_clients(room, Instant::now(), self.reg_ttl())
+                                if pend.created_at.elapsed()
+                                    > Duration::from_millis(PENDING_REG_TTL_MS)
                                 {
-                                    self.remove_ip_room(ip, &r);
-                                }
-                                // Cookie matches; admit the client, re-checking caps.
-                                let is_new = !entry.udp_clients.contains_key(&src_str);
-                                let hard_cap =
-                                    entry.udp_clients.len() >= self.max_clients_hard() && is_new;
-                                let ip_capped = if is_new {
-                                    let ip_already = entry.udp_clients.keys().any(|a| {
-                                        ip_key(a.parse().expect("stored addr is valid")) == src_ip
-                                    });
-                                    !ip_already
-                                        && self.count_ip_rooms(src_ip) >= self.max_rooms_per_ip()
-                                } else {
-                                    false
-                                };
-                                if hard_cap {
+                                    entry.remove_pending(&src_str);
                                     self.drop_packet(
+                                        src,
+                                        &format!(
+                                            "Dropped expired cookie from {src_str} in room {room}"
+                                        ),
+                                    );
+                                    RegAction::None
+                                } else {
+                                    // Capture the resolved address before eviction
+                                    // can invalidate the matched pending entry.
+                                    let resolved = pend.resolved_addr;
+                                    // Evict stale clients before the cap checks so a
+                                    // valid cookie completion is not rejected because
+                                    // of long-idle clients.
+                                    for (ip, r) in entry.remove_stale_clients(
+                                        room,
+                                        Instant::now(),
+                                        self.reg_ttl(),
+                                    ) {
+                                        self.remove_ip_room(ip, &r);
+                                    }
+                                    // Cookie matches; admit the client, re-checking caps.
+                                    let is_new = !entry.udp_clients.contains_key(&src_str);
+                                    let hard_cap = entry.udp_clients.len()
+                                        >= self.max_clients_hard()
+                                        && is_new;
+                                    let ip_capped = if is_new {
+                                        let ip_already = entry.udp_clients.keys().any(|a| {
+                                            ip_key(a.parse().expect("stored addr is valid"))
+                                                == src_ip
+                                        });
+                                        !ip_already
+                                            && self.count_ip_rooms(src_ip)
+                                                >= self.max_rooms_per_ip()
+                                    } else {
+                                        false
+                                    };
+                                    let prefix_capped = is_new
+                                        && count_prefix_clients(&entry, src_ip)
+                                            >= self.max_clients_per_prefix_per_room();
+                                    if hard_cap {
+                                        self.drop_packet(
                                         src,
                                         &format!(
                                             "Room {room} at hard cap ({}), rejecting {src_str} (cookie admission)",
                                             self.max_clients_hard()
                                         ),
                                     );
-                                    RegAction::None
-                                } else if ip_capped {
-                                    self.drop_packet(
+                                        RegAction::None
+                                    } else if ip_capped {
+                                        self.drop_packet(
                                         src,
                                         &format!(
                                             "Room limit per IP reached for {src_str} (cookie admission)"
                                         ),
                                     );
-                                    RegAction::None
-                                } else {
-                                    // Admit (Go: unconditional after the cap
-                                    // checks; re-admits already-admitted
-                                    // clients, refreshing last_seen).
-                                    entry.remove_pending(&src_str);
-                                    entry
-                                        .udp_clients
-                                        .insert(src_str.clone(), UdpClient::new(Some(resolved)));
-                                    entry.t = Instant::now();
-                                    let ip_already = entry.udp_clients.keys().any(|a| {
-                                        a != &src_str
-                                            && ip_key(a.parse().expect("stored addr is valid"))
-                                                == src_ip
-                                    });
-                                    if !ip_already {
-                                        self.add_ip_room(src_ip, room);
+                                        RegAction::None
+                                    } else if prefix_capped {
+                                        self.drop_packet(
+                                        src,
+                                        &format!(
+                                            "Room {room} per-prefix client limit ({}) reached for {src_str} (cookie admission)",
+                                            self.max_clients_per_prefix_per_room()
+                                        ),
+                                    );
+                                        RegAction::None
+                                    } else {
+                                        // Admit (Go: unconditional after the cap
+                                        // checks; re-admits already-admitted
+                                        // clients, refreshing last_seen).
+                                        entry.remove_pending(&src_str);
+                                        entry.udp_clients.insert(
+                                            src_str.clone(),
+                                            UdpClient::new(Some(resolved)),
+                                        );
+                                        entry.t = Instant::now();
+                                        let ip_already = entry.udp_clients.keys().any(|a| {
+                                            a != &src_str
+                                                && ip_key(a.parse().expect("stored addr is valid"))
+                                                    == src_ip
+                                        });
+                                        if !ip_already {
+                                            self.add_ip_room(src_ip, room);
+                                        }
+                                        self.stat_regs.fetch_add(1, Ordering::Relaxed);
+                                        RegAction::Regd
                                     }
-                                    self.stat_regs.fetch_add(1, Ordering::Relaxed);
-                                    RegAction::Regd
                                 }
                             }
                         }
@@ -821,12 +919,7 @@ impl Relay {
             return;
         }
 
-        // No cookie: initial REG. (Go keys the REG rate limit by the full
-        // source string, not just the IP.)
-        if self.is_reg_rate_limited(&src.to_string()) {
-            self.drop_packet(src, &format!("Rate-limited REG from {src_str}"));
-            return;
-        }
+        // No cookie: initial REG.
         if self.count_ip_rooms(src_ip) >= self.max_rooms_per_ip() {
             self.drop_packet(src, &format!("Room limit per IP reached for {src_str}"));
             return;
@@ -908,15 +1001,23 @@ impl Relay {
                             RegAction::None
                         } else {
                             let cb = random_cookie();
-                            entry.add_pending(
+                            if !entry.add_pending(
                                 &src_str,
                                 PendingReg {
                                     cookie: cb,
                                     created_at: Instant::now(),
                                     resolved_addr: src,
                                 },
-                            );
-                            RegAction::Challenge(cb)
+                                self.max_pending_per_room(),
+                            ) {
+                                self.drop_packet(
+                                    src,
+                                    &format!("Pending store full for {src_str} in room {room}"),
+                                );
+                                RegAction::None
+                            } else {
+                                RegAction::Challenge(cb)
+                            }
                         }
                     }
                 };
@@ -1023,6 +1124,19 @@ impl Relay {
                     self.drop_packet(
                         src,
                         &format!("Room limit per IP reached for {src_str} (cookie completion)"),
+                    );
+                    return RegAction::None;
+                }
+                if !entry.udp_clients.contains_key(src_str)
+                    && count_prefix_clients(&entry, src_ip)
+                        >= self.max_clients_per_prefix_per_room()
+                {
+                    self.drop_packet(
+                        src,
+                        &format!(
+                            "Room {room} per-prefix client limit ({}) reached for {src_str} (cookie completion)",
+                            self.max_clients_per_prefix_per_room()
+                        ),
                     );
                     return RegAction::None;
                 }

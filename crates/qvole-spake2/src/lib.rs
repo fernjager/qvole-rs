@@ -41,6 +41,12 @@ pub enum Error {
     /// Go: `spake2: confirm nonce must be non-empty`.
     #[error("spake2: confirm nonce must be non-empty")]
     EmptyNonce,
+    /// Go: `spake2: certificate fingerprints must be 32 bytes`.
+    #[error("spake2: certificate fingerprints must be 32 bytes")]
+    BadFingerprint,
+    /// Go: `spake2: reflected certificate fingerprint`.
+    #[error("spake2: reflected certificate fingerprint")]
+    ReflectedFingerprint,
     /// Go: `ciphertext too short`.
     #[error("ciphertext too short")]
     CiphertextTooShort,

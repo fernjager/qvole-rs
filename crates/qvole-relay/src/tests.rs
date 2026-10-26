@@ -263,6 +263,57 @@ fn ip_key_basic() {
 }
 
 #[test]
+fn ip_key_groups_ipv6_by_64() {
+    let a: SocketAddr = "[2001:db8:1:2::1]:1000".parse().unwrap();
+    let b: SocketAddr = "[2001:db8:1:2::ffff]:2000".parse().unwrap();
+    let c: SocketAddr = "[2001:db8:1:3::1]:1000".parse().unwrap();
+    assert_eq!(ip_key(a), ip_key(b), "same /64 must collapse");
+    assert_ne!(ip_key(a), ip_key(c), "different /64 must not collapse");
+}
+
+#[test]
+fn drop_log_limiter_global_budget_and_cap() {
+    let now = Duration::from_secs(0);
+    let mut l = DropLogLimiter::with_limits(100, 2);
+    assert!(l.allow("a", now));
+    assert!(l.allow("b", now));
+    assert!(!l.allow("c", now), "global per-second budget exceeded");
+
+    let mut l = DropLogLimiter::with_limits(3, 1000);
+    assert!(l.allow("a", now));
+    assert!(l.allow("b", now));
+    assert!(l.allow("c", now));
+    assert!(!l.allow("d", now), "map cap exceeded");
+    assert_eq!(l.last.len(), 3);
+}
+
+#[test]
+fn add_pending_enforces_room_cap() {
+    let now = Instant::now();
+    let src = "10.0.0.1:1000".parse::<SocketAddr>().unwrap();
+    let mut e = RoomEntry::new();
+    assert!(e.add_pending(
+        &src.to_string(),
+        PendingReg {
+            cookie: [0u8; PENDING_COOKIE_BYTES],
+            created_at: now,
+            resolved_addr: src,
+        },
+        1
+    ));
+    let src2 = "10.0.0.2:1000".parse::<SocketAddr>().unwrap();
+    assert!(!e.add_pending(
+        &src2.to_string(),
+        PendingReg {
+            cookie: [0u8; PENDING_COOKIE_BYTES],
+            created_at: now,
+            resolved_addr: src2,
+        },
+        1
+    ));
+}
+
+#[test]
 fn relay_constants() {
     let d = Config::defaults();
     assert_eq!(d.max_rooms, 10_000);
@@ -275,6 +326,8 @@ fn relay_constants() {
     assert_eq!(d.max_rooms_per_ip, 10);
     assert_eq!(NUM_REG_SHARDS, 16);
     assert_eq!(d.max_clients_hard, 20);
+    assert_eq!(d.max_pending_per_room, 256);
+    assert_eq!(d.max_clients_per_prefix_per_room, 4);
 }
 
 // --- MSG rate limiter (Go TestIsRateLimited_*) ---
@@ -1159,8 +1212,8 @@ fn pending_counts_stay_accurate() {
 
     // In-room pending counters.
     let mut entry = RoomEntry::new();
-    entry.add_pending(&a.to_string(), mk(now, a));
-    entry.add_pending(&a.to_string(), mk(now, a)); // replace, no double count
+    entry.add_pending(&a.to_string(), mk(now, a), 256);
+    entry.add_pending(&a.to_string(), mk(now, a), 256); // replace, no double count
     assert_eq!(entry.pending_count_for_ip(ip_key(a)), 1);
     assert!(entry.remove_pending(&a.to_string()).is_some());
     assert_eq!(entry.pending_count_for_ip(ip_key(a)), 0);

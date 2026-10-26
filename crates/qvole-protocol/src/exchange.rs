@@ -10,6 +10,7 @@
 //! rejected (reflection check).
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use rand::RngCore;
@@ -26,6 +27,8 @@ pub const FINGERPRINT_SIZE: usize = 32;
 pub const SPAKE2_PAYLOAD_LEN: usize = POINT_LEN * 2 + FINGERPRINT_SIZE; // 162
 pub const MAX_CANDIDATES: usize = 50;
 pub const MAX_BUFFERED_CONFIRMS: usize = 200;
+/// Bound on inbound `MSGD` work per second (Go `maxInboundMSGDPerSecond`).
+pub const MAX_INBOUND_MSGD_PER_SECOND: usize = 500;
 pub const READ_BUFFER_SIZE: usize = 1500;
 pub const SPAKE2_RESEND_INTERVAL: Duration = Duration::from_secs(2);
 pub const CONFIRM_RESEND_INTERVAL: Duration = Duration::from_secs(2);
@@ -249,6 +252,7 @@ pub fn process_spake_msg(
     state: &spake2::State,
     my_point_m: &[u8],
     my_point_n: &[u8],
+    my_fingerprint: &[u8],
 ) -> Result<ProcessedSpake, ExchangeError> {
     let peer_payload = hex::hex_decode(body)
         .ok_or_else(|| ExchangeError::Hex("invalid hex string".to_string()))?;
@@ -258,6 +262,16 @@ pub fn process_spake_msg(
     let peer_point_m = &peer_payload[..POINT_LEN];
     let peer_point_n = &peer_payload[POINT_LEN..POINT_LEN * 2];
     let peer_fingerprint = peer_payload[POINT_LEN * 2..SPAKE2_PAYLOAD_LEN].to_vec();
+    if my_fingerprint.len() != FINGERPRINT_SIZE || peer_fingerprint.len() != FINGERPRINT_SIZE {
+        return Err(ExchangeError::Wire(
+            "spake2: certificate fingerprints must be 32 bytes".into(),
+        ));
+    }
+    if my_fingerprint == peer_fingerprint.as_slice() {
+        return Err(ExchangeError::Wire(
+            "spake2: peer sent reflected certificate fingerprint".into(),
+        ));
+    }
 
     if my_point_m == peer_point_m {
         return Err(ExchangeError::Wire(
@@ -274,8 +288,14 @@ pub fn process_spake_msg(
 
     let peer_used_m = is_server;
     let mut shared = state.compute_shared(&effective_peer_point, peer_used_m)?;
-    let (ck, ek) = spake2::derive_session_key(&shared, &effective_my_point, &effective_peer_point)
-        .map_err(|e| ExchangeError::DeriveKey(e.to_string()))?;
+    let (ck, ek) = spake2::derive_session_key(
+        &shared,
+        &effective_my_point,
+        &effective_peer_point,
+        my_fingerprint,
+        &peer_fingerprint,
+    )
+    .map_err(|e| ExchangeError::DeriveKey(e.to_string()))?;
     spake2::zero_bytes(&mut shared);
 
     Ok(ProcessedSpake {
@@ -297,6 +317,7 @@ pub fn build_confirm_payload(
     enc_key: &[u8],
     my_point: &[u8],
     peer_point: &[u8],
+    my_fingerprint: &[u8],
     peer_fingerprint: &[u8],
     my_addr: &str,
 ) -> Result<Vec<u8>, ExchangeError> {
@@ -308,6 +329,7 @@ pub fn build_confirm_payload(
         my_point,
         peer_point,
         &confirm_nonce,
+        my_fingerprint,
         peer_fingerprint,
     )
     .map_err(|e| ExchangeError::ComputeConfirm(e.to_string()))?;
@@ -347,6 +369,7 @@ pub fn process_confirm_msg(
     my_point: &[u8],
     peer_point: &[u8],
     my_fingerprint: &[u8],
+    peer_fingerprint: &[u8],
 ) -> Result<String, ExchangeError> {
     let peer_confirm_payload =
         hex::hex_decode(hex_body).ok_or_else(|| ExchangeError::Hex("invalid hex string".into()))?;
@@ -365,6 +388,7 @@ pub fn process_confirm_msg(
         peer_point,
         peer_nonce,
         my_fingerprint,
+        peer_fingerprint,
         peer_confirm,
     ) {
         return Err(ExchangeError::ConfirmMismatch);
@@ -440,6 +464,13 @@ impl CandidatesGuard {
         self.0.insert(k, v);
     }
 
+    fn remove(&mut self, k: &str) {
+        if let Some(mut cand) = self.0.remove(k) {
+            spake2::zero_bytes(&mut cand.confirm_key);
+            spake2::zero_bytes(&mut cand.enc_key);
+        }
+    }
+
     fn iter(&self) -> impl Iterator<Item = (&String, &PeerCandidate)> {
         self.0.iter()
     }
@@ -485,6 +516,9 @@ pub async fn register_and_exchange(
     let mut last_reg_sent: Option<Instant> = None;
     let mut received_regd = false;
     let mut pending_cookie = String::new();
+    let mut last_ext_addr_log: Option<Instant> = None;
+    let mut inbound_window: Option<Instant> = None;
+    let mut inbound_count = 0usize;
 
     loop {
         if cancel.is_cancelled() {
@@ -538,6 +572,18 @@ pub async fn register_and_exchange(
         };
         let line = trim_ascii(&read_buf[..n]);
 
+        if line.starts_with(b"MSGD ") {
+            let now = Instant::now();
+            if inbound_window.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
+                inbound_window = Some(now);
+                inbound_count = 0;
+            }
+            inbound_count += 1;
+            if inbound_count > MAX_INBOUND_MSGD_PER_SECOND {
+                continue;
+            }
+        }
+
         if let Some(rest) = line.strip_prefix(b"REGD ") {
             let (relay_room, relay_payload) = match rest.iter().position(|&c| c == b' ') {
                 Some(i) => (&rest[..i], &rest[i + 1..]),
@@ -554,11 +600,22 @@ pub async fn register_and_exchange(
             if let Some(ok_rest) = payload.strip_prefix(b"OK ") {
                 received_regd = true;
                 let ext_addr = trim_ascii(ok_rest);
-                if !ext_addr.is_empty() {
-                    let ext = String::from_utf8_lossy(ext_addr).into_owned();
-                    my_addr = ext;
-                    LOG_RELAY
-                        .printf_success(&format!("Connected! Ext. address: {}", bold(&my_addr)));
+                if let Ok(ext) = std::str::from_utf8(ext_addr) {
+                    // The relay is untrusted: only accept a literal IP:port,
+                    // never a hostname (which would trigger DNS and allow
+                    // redirecting hole-punch/QUIC traffic).
+                    if let Ok(parsed) = ext.parse::<SocketAddr>()
+                        && parsed.port() != 0
+                        && ext.is_ascii()
+                        && ext.bytes().all(|b| (33..=126).contains(&b))
+                    {
+                        my_addr = ext.to_string();
+                        if last_ext_addr_log.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
+                            LOG_RELAY
+                                .printf_success(&format!("Connected! Ext. address: {:?}", my_addr));
+                            last_ext_addr_log = Some(Instant::now());
+                        }
+                    }
                 }
                 continue;
             }
@@ -583,22 +640,21 @@ pub async fn register_and_exchange(
                     continue;
                 }
             };
-            let point_hex = hex::to_hex_lower(&peer_payload[..POINT_LEN]);
-            if candidates.contains(&point_hex) {
-                continue;
-            }
-            if candidates.len() >= MAX_CANDIDATES {
-                LOG_SPAKE2.printf_warn(&format!(
-                    "Too many SPAKE2 candidates ({}), dropping",
-                    candidates.len()
-                ));
+            let payload_key = hex::to_hex_lower(&peer_payload[..SPAKE2_PAYLOAD_LEN]);
+            if candidates.contains(&payload_key) {
                 continue;
             }
 
-            let mut proc = match process_spake_msg(hex_body, &state.0, &my_point_m, &my_point_n) {
+            let mut proc = match process_spake_msg(
+                hex_body,
+                &state.0,
+                &my_point_m,
+                &my_point_n,
+                my_fingerprint,
+            ) {
                 Ok(p) => p,
                 Err(e) => {
-                    LOG_SPAKE2.printf_warn(&format!("Invalid SPAKE2 message: {e}"));
+                    LOG_SPAKE2.printf(&format!("Invalid SPAKE2 message: {e}"));
                     continue;
                 }
             };
@@ -607,19 +663,33 @@ pub async fn register_and_exchange(
                 &proc.enc_key,
                 &proc.effective_my_point,
                 &proc.effective_peer_point,
+                my_fingerprint,
                 &proc.peer_fingerprint,
                 &my_addr,
             ) {
                 Ok(cp) => cp,
                 Err(e) => {
-                    LOG_SPAKE2.printf_error(&format!("Failed to build confirm payload: {e}"));
+                    LOG_SPAKE2.printf(&format!("Failed to build confirm payload: {e}"));
                     spake2::zero_bytes(&mut proc.confirm_key);
                     spake2::zero_bytes(&mut proc.enc_key);
                     continue;
                 }
             };
+            if candidates.len() >= MAX_CANDIDATES {
+                let evict_key = candidates
+                    .iter()
+                    .min_by_key(|(k, _)| confirm_last_sent.get(*k).copied())
+                    .map(|(k, _)| k.clone());
+                if let Some(k) = evict_key {
+                    candidates.remove(&k);
+                    confirm_last_sent.remove(&k);
+                    LOG_SPAKE2.printf(&format!(
+                        "SPAKE2 candidate table full ({MAX_CANDIDATES}), evicting oldest"
+                    ));
+                }
+            }
             candidates.insert(
-                point_hex.clone(),
+                payload_key.clone(),
                 PeerCandidate {
                     point: proc.effective_peer_point.clone(),
                     fingerprint: proc.peer_fingerprint.clone(),
@@ -633,9 +703,9 @@ pub async fn register_and_exchange(
 
             let msg = format!("MSG {room} confirm {}\n", hex::to_hex_lower(&cp));
             let _ = sock.send(msg.as_bytes()).await;
-            confirm_last_sent.insert(point_hex.clone(), Instant::now());
+            confirm_last_sent.insert(payload_key.clone(), Instant::now());
 
-            LOG_SPAKE2.printf_success("Points exchanged with peer");
+            LOG_SPAKE2.printf("Points exchanged with peer");
 
             for buffered in buffered_confirms.clone() {
                 if let Ok(pa) = process_confirm_msg(
@@ -645,6 +715,7 @@ pub async fn register_and_exchange(
                     &proc.effective_my_point,
                     &proc.effective_peer_point,
                     my_fingerprint,
+                    &proc.peer_fingerprint,
                 ) {
                     LOG_SPAKE2.printf_success("Peer authenticated (buffered)");
                     return Ok((pa, proc.peer_fingerprint, proc.is_server));
@@ -664,6 +735,7 @@ pub async fn register_and_exchange(
                     &cand.effective_my_point,
                     &cand.point,
                     my_fingerprint,
+                    &cand.fingerprint,
                 ) {
                     Ok(pa) => pa,
                     Err(_) => continue 'candidates,

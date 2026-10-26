@@ -163,7 +163,12 @@ async fn connect_inner(
     let mut peer_udp_addr: SocketAddr = peer_addr_str
         .parse()
         .map_err(|e: std::net::AddrParseError| ConnectError::ResolvePeer(e.to_string()))?;
-    if peer_udp_addr.ip().is_unspecified() || peer_udp_addr.port() == 0 {
+    let peer_ip = peer_udp_addr.ip();
+    if peer_ip.is_unspecified()
+        || peer_ip.is_multicast()
+        || peer_ip == std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST)
+        || peer_udp_addr.port() == 0
+    {
         return Err(ConnectError::InvalidPeerAddr(peer_addr_str));
     }
 
@@ -307,8 +312,12 @@ async fn accept_quic(
     cancel: &CancellationToken,
     cfg: &PeerConfig,
 ) -> Result<Connection, ConnectError> {
+    let deadline = tokio::time::Instant::now() + cfg.handshake_timeout();
     let incoming = loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(ConnectError::Accept("handshake timeout".into()));
+            }
             accepted = endpoint.accept() => match accepted {
                 Some(incoming) => break incoming,
                 None => continue, // endpoint closed

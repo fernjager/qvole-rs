@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions follow the upstream Go release line.
 
+## [0.2.5] - 2026-10-26
+
+### Security
+
+- Fix the critical relay impersonation: the confirm HMAC and HKDF now bind both
+  peers' certificate fingerprints in sender/receiver order; reflected
+  fingerprints are rejected. Protocol 0.2 is wire-breaking (ALPN
+  `qvole-v0.2`); 0.1 peers are rejected.
+- Disable TLS session resumption on clients and session tickets on servers so a
+  resumed session cannot skip the pinned certificate check.
+- Validate relay-supplied addresses as literal `IP:port`, reject
+  unspecified/multicast/broadcast peer targets, and bound the listener wait.
+- Deduplicate SPAKE2 candidates by full payload with bounded eviction and
+  rate-limit inbound `MSGD`.
+- Harden the relay with per-room pending caps, per-prefix client caps, IPv6
+  /64 grouping for per-IP limits, bounded/rate-limited drop logs, and TTL
+  checks at cookie completion.
+
 ## [0.2.4] - 2026-10-21
 
 ### Security

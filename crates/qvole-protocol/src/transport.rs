@@ -1,7 +1,7 @@
 //! QUIC transport configuration (Go `internal/engine/transport.go`).
 //!
 //! TLS 1.3 with pinned SHA-256 certificate fingerprints (no trust anchor),
-//! fixed ALPN `qvole-v0.1`, and a transport profile tuned for bulk transfer.
+//! fixed ALPN `qvole-v0.2`, and a transport profile tuned for bulk transfer.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,9 +20,11 @@ use webpki::EndEntityCert;
 use crate::cert::{SelfSignedCert, constant_time_eq};
 use crate::exchange::PeerConfig;
 
-pub const PROTOCOL_VERSION: &str = "0.1";
+/// Protocol 0.2 binds both peers' certificate fingerprints into the SPAKE2
+/// session key and confirm HMAC; 0.1 peers are intentionally incompatible.
+pub const PROTOCOL_VERSION: &str = "0.2";
 /// ALPN identifier (Go: `"qvole-v" + ProtocolVersion`).
-pub const ALPN: &[u8] = b"qvole-v0.1";
+pub const ALPN: &[u8] = b"qvole-v0.2";
 pub const DEFAULT_KEEP_ALIVE_PERIOD: Duration = Duration::from_secs(5);
 pub const DEFAULT_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -283,6 +285,9 @@ pub fn client_tls_config(
     // Go: `NextProtos: []string{alpn}` - fixed ALPN, wire-compatible with
     // quic-go peers.
     config.alpn_protocols = vec![ALPN.to_vec()];
+    // VerifyPeerCertificate equivalents are skipped on resumed sessions in
+    // Go; disable resumption outright here for the same invariant.
+    config.resumption = rustls::client::Resumption::disabled();
     Ok(config)
 }
 
@@ -304,6 +309,9 @@ pub fn server_tls_config(
         )?;
     // Go: `NextProtos: []string{alpn}`.
     config.alpn_protocols = vec![ALPN.to_vec()];
+    // No session tickets: a resumed session must not bypass the pinned
+    // client-certificate check.
+    config.send_tls13_tickets = 0;
     Ok(config)
 }
 

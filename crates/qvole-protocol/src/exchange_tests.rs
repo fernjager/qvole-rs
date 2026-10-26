@@ -7,6 +7,14 @@ const TEST_FINGERPRINT: [u8; 32] = [
     0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
     0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
 ];
+const TEST_FINGERPRINT_B: [u8; 32] = [
+    0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+    0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE, 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+];
+const TEST_FINGERPRINT_E: [u8; 32] = [
+    0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
+    0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
+];
 
 /// Port of `setupSPAKE2Session`.
 fn setup_spake2_session(password: &str) -> ([u8; 32], [u8; 32], Vec<u8>, Vec<u8>) {
@@ -29,7 +37,14 @@ fn setup_spake2_session(password: &str) -> ([u8; 32], [u8; 32], Vec<u8>, Vec<u8>
     let mut shared = my_state.compute_shared(&peer_point, peer_used_m).unwrap();
     my_state.destroy();
 
-    let (ck, ek) = spake2::derive_session_key(&shared, &my_point, &peer_point).unwrap();
+    let (ck, ek) = spake2::derive_session_key(
+        &shared,
+        &my_point,
+        &peer_point,
+        &TEST_FINGERPRINT,
+        &TEST_FINGERPRINT_B,
+    )
+    .unwrap();
     spake2::zero_bytes(&mut shared);
     (ck, ek, my_point, peer_point)
 }
@@ -75,7 +90,7 @@ fn process_spake_msg_too_short() {
     let my_n = state.blinded_bytes_n();
 
     let short_hex = hex::to_hex_lower(&[0u8; 30]);
-    let err = process_spake_msg(&short_hex, &state, &my_m, &my_n).unwrap_err();
+    let err = process_spake_msg(&short_hex, &state, &my_m, &my_n, &TEST_FINGERPRINT).unwrap_err();
     assert!(err.to_string().contains("too short"));
 }
 
@@ -85,7 +100,14 @@ fn process_spake_msg_invalid_hex() {
     let my_m = state.blinded_bytes_m();
     let my_n = state.blinded_bytes_n();
 
-    let err = process_spake_msg("not-a-valid-hex-string!", &state, &my_m, &my_n).unwrap_err();
+    let err = process_spake_msg(
+        "not-a-valid-hex-string!",
+        &state,
+        &my_m,
+        &my_n,
+        &TEST_FINGERPRINT,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("hex"));
 }
 
@@ -98,8 +120,7 @@ fn process_spake_msg_success() {
     let my_n = my_state.blinded_bytes_n();
     let peer_m = peer_state.blinded_bytes_m();
     let peer_n = peer_state.blinded_bytes_n();
-    let mut peer_fingerprint = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut peer_fingerprint);
+    let peer_fingerprint = TEST_FINGERPRINT_B;
 
     let mut payload = Vec::with_capacity(SPAKE2_PAYLOAD_LEN);
     payload.extend_from_slice(&peer_m);
@@ -107,7 +128,7 @@ fn process_spake_msg_success() {
     payload.extend_from_slice(&peer_fingerprint);
     let hex_body = hex::to_hex_lower(&payload);
 
-    let proc = process_spake_msg(&hex_body, &my_state, &my_m, &my_n).unwrap();
+    let proc = process_spake_msg(&hex_body, &my_state, &my_m, &my_n, &TEST_FINGERPRINT).unwrap();
     assert_eq!(proc.effective_my_point.len(), 65);
     assert_eq!(proc.effective_peer_point.len(), 65);
     assert_eq!(proc.peer_fingerprint.len(), 32);
@@ -124,8 +145,7 @@ fn process_spake_msg_reflected_point() {
     let state = spake2::new_state("test-reflected-point").unwrap();
     let my_m = state.blinded_bytes_m();
     let my_n = state.blinded_bytes_n();
-    let mut peer_fingerprint = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut peer_fingerprint);
+    let peer_fingerprint = TEST_FINGERPRINT_B;
 
     let mut payload = Vec::with_capacity(SPAKE2_PAYLOAD_LEN);
     payload.extend_from_slice(&my_m); // reflected M point
@@ -133,7 +153,7 @@ fn process_spake_msg_reflected_point() {
     payload.extend_from_slice(&peer_fingerprint);
     let hex_body = hex::to_hex_lower(&payload);
 
-    let err = process_spake_msg(&hex_body, &state, &my_m, &my_n).unwrap_err();
+    let err = process_spake_msg(&hex_body, &state, &my_m, &my_n, &TEST_FINGERPRINT).unwrap_err();
     assert!(err.to_string().contains("reflected"));
 }
 
@@ -148,6 +168,7 @@ fn build_confirm_payload_size() {
         &my_point,
         &peer_point,
         &TEST_FINGERPRINT,
+        &TEST_FINGERPRINT_B,
         "10.0.0.1:8080",
     )
     .unwrap();
@@ -163,6 +184,7 @@ fn build_confirm_payload_nonce_random() {
         &my_point,
         &peer_point,
         &TEST_FINGERPRINT,
+        &TEST_FINGERPRINT_B,
         "10.0.0.1:8080",
     )
     .unwrap();
@@ -172,6 +194,7 @@ fn build_confirm_payload_nonce_random() {
         &my_point,
         &peer_point,
         &TEST_FINGERPRINT,
+        &TEST_FINGERPRINT_B,
         "10.0.0.1:8080",
     )
     .unwrap();
@@ -188,6 +211,7 @@ fn build_confirm_payload_address_too_long() {
         &my_point,
         &peer_point,
         &TEST_FINGERPRINT,
+        &TEST_FINGERPRINT_B,
         &long_addr,
     )
     .unwrap_err();
@@ -199,13 +223,13 @@ fn build_confirm_payload_address_too_long() {
 #[test]
 fn process_confirm_msg_too_short() {
     let short_hex = hex::to_hex_lower(&[0u8; 64]);
-    let err = process_confirm_msg(&short_hex, &[], &[], &[], &[], &[]).unwrap_err();
+    let err = process_confirm_msg(&short_hex, &[], &[], &[], &[], &[], &[]).unwrap_err();
     assert!(matches!(err, ExchangeError::ConfirmPayloadTooShort));
 }
 
 #[test]
 fn process_confirm_msg_invalid_hex() {
-    let err = process_confirm_msg("not-hex!!!", &[], &[], &[], &[], &[]).unwrap_err();
+    let err = process_confirm_msg("not-hex!!!", &[], &[], &[], &[], &[], &[]).unwrap_err();
     assert!(matches!(err, ExchangeError::Hex(_)));
 }
 
@@ -219,6 +243,7 @@ fn process_confirm_msg_wrong_key() {
         &my_point,
         &peer_point,
         &TEST_FINGERPRINT,
+        &TEST_FINGERPRINT_B,
         "10.0.0.1:8080",
     )
     .unwrap();
@@ -233,6 +258,7 @@ fn process_confirm_msg_wrong_key() {
         &ek,
         &my_point,
         &peer_point,
+        &TEST_FINGERPRINT_B,
         &TEST_FINGERPRINT,
     )
     .unwrap_err();
@@ -248,6 +274,7 @@ fn process_confirm_msg_round_trip() {
         &my_point,
         &peer_point,
         &TEST_FINGERPRINT,
+        &TEST_FINGERPRINT_B,
         "10.0.0.1:8080",
     )
     .unwrap();
@@ -259,6 +286,7 @@ fn process_confirm_msg_round_trip() {
         &ek,
         &my_point,
         &peer_point,
+        &TEST_FINGERPRINT_B,
         &TEST_FINGERPRINT,
     )
     .unwrap();
@@ -577,4 +605,91 @@ async fn register_and_exchange_non_timeout_net_error() {
     if let Ok(Ok(_)) = result {
         panic!("unexpected success");
     }
+}
+
+#[test]
+fn fingerprint_substitution_is_rejected() {
+    let password = "fingerprint-substitution-test";
+    let state_a = spake2::new_state(password).unwrap();
+    let state_b = spake2::new_state(password).unwrap();
+    let a_m = state_a.blinded_bytes_m();
+    let a_n = state_a.blinded_bytes_n();
+    let b_m = state_b.blinded_bytes_m();
+    let b_n = state_b.blinded_bytes_n();
+
+    let mut payload_a = Vec::new();
+    payload_a.extend_from_slice(&a_m);
+    payload_a.extend_from_slice(&a_n);
+    payload_a.extend_from_slice(&TEST_FINGERPRINT);
+
+    let mut payload_b = Vec::new();
+    payload_b.extend_from_slice(&b_m);
+    payload_b.extend_from_slice(&b_n);
+    payload_b.extend_from_slice(&TEST_FINGERPRINT_B);
+
+    let mut payload_b_sub = Vec::new();
+    payload_b_sub.extend_from_slice(&b_m);
+    payload_b_sub.extend_from_slice(&b_n);
+    payload_b_sub.extend_from_slice(&TEST_FINGERPRINT_E);
+
+    let b = process_spake_msg(
+        &hex::to_hex_lower(&payload_a),
+        &state_b,
+        &b_m,
+        &b_n,
+        &TEST_FINGERPRINT_B,
+    )
+    .unwrap();
+    let confirm_b = build_confirm_payload(
+        &b.confirm_key,
+        &b.enc_key,
+        &b.effective_my_point,
+        &b.effective_peer_point,
+        &TEST_FINGERPRINT_B,
+        &TEST_FINGERPRINT,
+        "127.0.0.1:2000",
+    )
+    .unwrap();
+
+    // The relay substituted B's fingerprint in the payload A receives.
+    let a_sub = process_spake_msg(
+        &hex::to_hex_lower(&payload_b_sub),
+        &state_a,
+        &a_m,
+        &a_n,
+        &TEST_FINGERPRINT,
+    )
+    .unwrap();
+    let rc = process_confirm_msg(
+        &hex::to_hex_lower(&confirm_b),
+        &a_sub.confirm_key,
+        &a_sub.enc_key,
+        &a_sub.effective_my_point,
+        &a_sub.effective_peer_point,
+        &TEST_FINGERPRINT,
+        &a_sub.peer_fingerprint,
+    );
+    assert!(rc.is_err(), "substituted fingerprint confirm was accepted");
+
+    // The genuine payload and confirm still verify.
+    let a_ok = process_spake_msg(
+        &hex::to_hex_lower(&payload_b),
+        &state_a,
+        &a_m,
+        &a_n,
+        &TEST_FINGERPRINT,
+    )
+    .unwrap();
+    assert!(
+        process_confirm_msg(
+            &hex::to_hex_lower(&confirm_b),
+            &a_ok.confirm_key,
+            &a_ok.enc_key,
+            &a_ok.effective_my_point,
+            &a_ok.effective_peer_point,
+            &TEST_FINGERPRINT,
+            &a_ok.peer_fingerprint,
+        )
+        .is_ok()
+    );
 }

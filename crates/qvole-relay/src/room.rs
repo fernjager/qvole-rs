@@ -2,7 +2,7 @@
 //! (pre-cookie) registrations, per-IP accounting, and validation helpers.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,12 +40,20 @@ pub fn shard_idx(key: &str, n: usize) -> usize {
 pub fn ip_key(src: SocketAddr) -> IpAddr {
     // SocketAddr already carries the parsed IP; the only divergence from
     // Go's net.ParseIP(...).String() is IPv4-mapped IPv6, which Go renders
-    // in dotted-quad form.
+    // in dotted-quad form. For IPv6, group by /64: one host normally controls
+    // an entire /64 and could otherwise rotate addresses to bypass every
+    // per-IP cap. Loopback stays exact.
     match src {
         SocketAddr::V4(v) => IpAddr::V4(*v.ip()),
         SocketAddr::V6(v) => match v.ip().to_ipv4_mapped() {
             Some(v4) => IpAddr::V4(v4),
-            None => IpAddr::V6(*v.ip()),
+            None if v.ip().is_loopback() => IpAddr::V6(*v.ip()),
+            None => {
+                let octets = v.ip().octets();
+                let mut masked = [0u8; 16];
+                masked[..8].copy_from_slice(&octets[..8]);
+                IpAddr::V6(Ipv6Addr::from(masked))
+            }
         },
     }
 }
@@ -179,11 +187,15 @@ impl RoomEntry {
 
     /// Insert an in-room pending registration, keeping the per-IP count in
     /// sync (Go `(*roomEntry).addPending`).
-    pub fn add_pending(&mut self, src: &str, p: PendingReg) {
+    pub fn add_pending(&mut self, src: &str, p: PendingReg, max_per_room: usize) -> bool {
+        if !self.pending.contains_key(src) && self.pending.len() >= max_per_room {
+            return false;
+        }
         let ip = ip_key(src.parse().expect("pending source addr is valid"));
         if self.pending.insert(src.to_string(), p).is_none() {
             *self.pending_by_ip.entry(ip).or_insert(0) += 1;
         }
+        true
     }
 
     /// Remove an in-room pending registration, keeping the per-IP count in
@@ -315,28 +327,64 @@ impl RegShard {
     }
 }
 
-/// Port of `ipRateLimiter`: per-IP rate limiting for drop log lines.
-#[derive(Debug, Default)]
+/// Port of `ipRateLimiter`: per-IP and global rate limiting for drop log lines.
+#[derive(Debug)]
 pub struct DropLogLimiter {
-    last: HashMap<String, Instant>,
+    pub(crate) last: HashMap<String, Instant>,
+    window_start: Instant,
+    window_count: usize,
+    max_entries: usize,
+    max_per_sec: usize,
+}
+
+impl Default for DropLogLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DropLogLimiter {
     pub fn new() -> Self {
         Self {
             last: HashMap::new(),
+            window_start: Instant::now(),
+            window_count: 0,
+            max_entries: 100_000,
+            max_per_sec: 100,
         }
     }
 
-    /// Port of `(*ipRateLimiter).allow`.
+    /// Test/constructor hook for custom bounds.
+    #[must_use]
+    pub fn with_limits(max_entries: usize, max_per_sec: usize) -> Self {
+        let mut lim = Self::new();
+        lim.max_entries = max_entries;
+        lim.max_per_sec = max_per_sec;
+        lim
+    }
+
+    /// Port of `(*ipRateLimiter).allow`. A spoofed-source flood can present
+    /// unlimited distinct IPs, so the per-IP interval is backed by a global
+    /// lines/second budget and a hard map cap.
     pub fn allow(&mut self, ip: &str, interval: Duration) -> bool {
         let now = Instant::now();
+        if now.duration_since(self.window_start) >= Duration::from_secs(1) {
+            self.window_start = now;
+            self.window_count = 0;
+        }
+        if self.window_count >= self.max_per_sec {
+            return false;
+        }
         if let Some(last) = self.last.get(ip)
             && now.duration_since(*last) < interval
         {
             return false;
         }
+        if !self.last.contains_key(ip) && self.last.len() >= self.max_entries {
+            return false;
+        }
         self.last.insert(ip.to_string(), now);
+        self.window_count += 1;
         true
     }
 

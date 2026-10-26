@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "qvole-app"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bytes",
  "quinn",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "qvole-bin"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "qvole-app",
  "qvole-protocol",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "qvole-protocol"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "quinn",
  "qvole-spake2",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "qvole-relay"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "flume",
  "qvole-protocol",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "qvole-spake2"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "aes-gcm",
  "hex",

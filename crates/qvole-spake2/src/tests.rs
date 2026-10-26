@@ -5,8 +5,8 @@
 use crate::code::{generate_code, is_generated_code, nameplate, rand_int};
 use crate::spake2::bytes32;
 use crate::spake2::{
-    MOD_P, ORDER_N, affine_coords, compute_weierstrass_y, generator_points, new_state,
-    password_to_scalar, point_from_xy, zero_bytes,
+    MOD_P, ORDER_N, affine_coords, compute_confirm, compute_weierstrass_y, derive_session_key,
+    generator_points, new_state, password_to_scalar, point_from_xy, verify_confirm, zero_bytes,
 };
 use crate::words::code_words;
 use p256::elliptic_curve::bigint::Encoding;
@@ -435,4 +435,54 @@ fn test_curve_constants_match_p256() {
         bytes32::to_scalar(&expected.to_be_bytes()),
         "ORDER_N does not match p256's group order"
     );
+}
+
+const FP_A: [u8; 32] = [0x11; 32];
+const FP_B: [u8; 32] = [0x22; 32];
+const FP_E: [u8; 32] = [0x33; 32];
+
+/// Both certificate fingerprints and the sender/receiver direction must be
+/// bound into the confirmation. A relay substituting the peer's fingerprint
+/// in the SPAKE2 payload must cause verification to fail.
+#[test]
+fn test_spake2_confirm_binds_both_fingerprints() {
+    let key = [0x55u8; 32];
+    let nonce = *b"0123456789abcdef";
+    let confirm = compute_confirm(&key, b"a", b"b", &nonce, &FP_A, &FP_B).unwrap();
+    assert!(verify_confirm(
+        &key, b"a", b"b", &nonce, &FP_B, &FP_A, &confirm
+    ));
+    assert!(!verify_confirm(
+        &key, b"a", b"b", &nonce, &FP_B, &FP_E, &confirm
+    ));
+    let substituted = compute_confirm(&key, b"a", b"b", &nonce, &FP_A, &FP_E).unwrap();
+    assert!(!verify_confirm(
+        &key,
+        b"a",
+        b"b",
+        &nonce,
+        &FP_B,
+        &FP_A,
+        &substituted
+    ));
+}
+
+#[test]
+fn test_spake2_confirm_rejects_reflection() {
+    let key = [0x55u8; 32];
+    let nonce = *b"0123456789abcdef";
+    assert!(compute_confirm(&key, b"a", b"b", &nonce, &FP_A, &FP_A).is_err());
+    assert!(!verify_confirm(
+        &key, b"a", b"b", &nonce, &FP_A, &FP_A, &[0u8; 32]
+    ));
+}
+
+#[test]
+fn test_spake2_session_key_binds_fingerprints() {
+    let shared = [0x66u8; 32];
+    let (ck1, _) = derive_session_key(&shared, b"a", b"b", &FP_A, &FP_B).unwrap();
+    let (ck2, _) = derive_session_key(&shared, b"a", b"b", &FP_B, &FP_A).unwrap();
+    let (ck3, _) = derive_session_key(&shared, b"a", b"b", &FP_A, &FP_E).unwrap();
+    assert_eq!(ck1, ck2, "fingerprint order must not change the key");
+    assert_ne!(ck1, ck3, "peer fingerprint must be bound into the key");
 }

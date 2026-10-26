@@ -100,6 +100,11 @@ const SESSION_INFO: &[u8] = b"qvole-spake2-session";
 const PW_PREFIX: &[u8] = b"qvole-spake2-pw:";
 /// Domain separation suffix for the confirm HMAC.
 const CONFIRM_INFO: &[u8] = b"qvole-spake2-confirm";
+/// Domain separation label binding both certificate fingerprints into HKDF.
+const FINGERPRINT_INFO: &[u8] = b"qvole-spake2-fingerprints";
+/// Direction labels for the confirm HMAC.
+const CONFIRM_SENDER_INFO: &[u8] = b"qvole-spake2-confirm-sender";
+const CONFIRM_RECEIVER_INFO: &[u8] = b"qvole-spake2-confirm-receiver";
 
 /// PBKDF2 iteration count.
 ///
@@ -496,8 +501,25 @@ pub fn derive_session_key(
     shared_secret: &[u8],
     my_point: &[u8],
     peer_point: &[u8],
+    my_fingerprint: &[u8],
+    peer_fingerprint: &[u8],
 ) -> Result<([u8; 32], [u8; 32]), Error> {
-    let aad = aad_with_generators(my_point, peer_point);
+    if my_fingerprint.len() != 32 || peer_fingerprint.len() != 32 {
+        return Err(Error::BadFingerprint);
+    }
+    if constant_time_eq(my_fingerprint, peer_fingerprint) {
+        return Err(Error::ReflectedFingerprint);
+    }
+    let mut aad = aad_with_generators(my_point, peer_point);
+    // Sorted so both peers derive the same salt.
+    let (fp_a, fp_b) = if my_fingerprint > peer_fingerprint {
+        (peer_fingerprint, my_fingerprint)
+    } else {
+        (my_fingerprint, peer_fingerprint)
+    };
+    aad.extend_from_slice(FINGERPRINT_INFO);
+    aad.extend_from_slice(fp_a);
+    aad.extend_from_slice(fp_b);
     let salt = Sha256::digest(&aad);
     let hk = Hkdf::<Sha256>::new(Some(salt.as_ref()), shared_secret);
     let mut key = [0u8; 64]; // 32 for confirm HMAC, 32 for AES-256-GCM
@@ -558,10 +580,17 @@ pub fn compute_confirm(
     my_point: &[u8],
     peer_point: &[u8],
     nonce: &[u8],
-    peer_fingerprint: &[u8],
+    sender_fingerprint: &[u8],
+    receiver_fingerprint: &[u8],
 ) -> Result<[u8; 32], Error> {
     if nonce.is_empty() {
         return Err(Error::EmptyNonce);
+    }
+    if sender_fingerprint.len() != 32 || receiver_fingerprint.len() != 32 {
+        return Err(Error::BadFingerprint);
+    }
+    if constant_time_eq(sender_fingerprint, receiver_fingerprint) {
+        return Err(Error::ReflectedFingerprint);
     }
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(session_key)
         .map_err(|e| Error::Hmac(e.to_string()))?;
@@ -575,7 +604,10 @@ pub fn compute_confirm(
     let g = n_generator();
     let (gx, gy) = affine_xy(g);
     mac.update(&marshal_point(&(gx, gy))[..]);
-    mac.update(peer_fingerprint);
+    mac.update(CONFIRM_SENDER_INFO);
+    mac.update(sender_fingerprint);
+    mac.update(CONFIRM_RECEIVER_INFO);
+    mac.update(receiver_fingerprint);
     mac.update(nonce);
     mac.update(CONFIRM_INFO);
     Ok(mac.finalize().into_bytes().into())
@@ -593,9 +625,17 @@ pub fn verify_confirm(
     peer_point: &[u8],
     nonce: &[u8],
     my_fingerprint: &[u8],
+    peer_fingerprint: &[u8],
     peer_confirm: &[u8],
 ) -> bool {
-    let expected = match compute_confirm(session_key, my_point, peer_point, nonce, my_fingerprint) {
+    let expected = match compute_confirm(
+        session_key,
+        my_point,
+        peer_point,
+        nonce,
+        peer_fingerprint,
+        my_fingerprint,
+    ) {
         Ok(c) => c,
         Err(_) => return false,
     };

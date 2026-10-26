@@ -67,11 +67,15 @@ fn tls_configs_alpn() {
     assert_eq!(
         client.alpn_protocols,
         vec![ALPN.to_vec()],
-        "expected NextProtos [\"qvole-v0.1\"]"
+        "expected NextProtos [\"qvole-v0.2\"]"
     );
 
     let server = server_tls_config(&cert, &fp).expect("server tls config");
     assert_eq!(server.alpn_protocols, vec![ALPN.to_vec()]);
+    assert_eq!(
+        server.send_tls13_tickets, 0,
+        "session tickets must be disabled so resumption cannot skip pinning"
+    );
 }
 
 #[test]

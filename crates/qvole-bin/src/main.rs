@@ -1,7 +1,7 @@
 //! `qvole` command-line binary.
 //!
 //! Port of `cmd/qvole/main.go` + `cmd/qvole/signal_unix.go` (Go reference
-//! release v0.2.4).
+//! release v0.2.5).
 //!
 //! ## Fidelity notes
 //!
@@ -1074,7 +1074,7 @@ mod tests {
 
     #[test]
     fn test_usage_matches_go_verbatim() {
-        // Byte-compare against the Go `printUsage` output (qvole 0.2.4).
+        // Byte-compare against the Go `printUsage` output (qvole 0.2.5).
         let go_usage = include_str!("usage_go.txt");
         assert_eq!(usage_text(), go_usage);
     }
@@ -1253,7 +1253,7 @@ mod tests {
         // Go: `qvole %s (protocol v%s)`, plus a `, rust port` self-identifier.
         assert_eq!(
             format!("qvole {VERSION} (protocol v{PROTOCOL_VERSION}, rust port)"),
-            "qvole 0.2.4 (protocol v0.1, rust port)"
+            "qvole 0.2.5 (protocol v0.2, rust port)"
         );
     }
 }
