@@ -9,7 +9,6 @@ use crate::spake2::{
     generator_points, new_state, password_to_scalar, point_from_xy, verify_confirm, zero_bytes,
 };
 use crate::words::code_words;
-use p256::elliptic_curve::bigint::Encoding;
 use p256::elliptic_curve::ff::Field;
 use p256::{AffinePoint, ProjectivePoint, Scalar, U256};
 
@@ -114,18 +113,18 @@ fn test_spake2_new_state_empty_password() {
     assert_on_curve(&s.blinded_n.0, &s.blinded_n.1);
 }
 
-fn assert_on_curve(x: &p256::FieldElement, y: &p256::FieldElement) {
-    // Panics if the point is not on the curve (from_encoded_point validates).
+fn assert_on_curve(x: &crate::spake2::FieldElement, y: &crate::spake2::FieldElement) {
+    // Panics if the point is not on the curve (from_sec1_point validates).
     let _ = point_from_xy(x, y);
 }
 
 /// Port of `TestSPAKE2_WeierstrassY_RhsZero`.
 #[test]
 fn test_spake2_compute_weierstrass_y_rhs_zero() {
-    use p256::FieldElement;
+    use crate::spake2::FieldElement;
     // x=0 and x=1: P-256's rhs may or may not be a square; Go only logs.
-    let _ = compute_weierstrass_y(&FieldElement::from_u64(0));
-    let _ = compute_weierstrass_y(&FieldElement::from_u64(1));
+    let _ = compute_weierstrass_y(&FieldElement::from(0u64));
+    let _ = compute_weierstrass_y(&FieldElement::from(1u64));
 
     // Known valid seed point: ComputeWeierstrassY reproduces HashToCurve's y.
     let (mx, my) = affine_coords(&generator_points().0);
@@ -139,10 +138,10 @@ fn test_spake2_compute_weierstrass_y_rhs_zero() {
 /// Port of `TestSPAKE2_WeierstrassY_NilReturn`.
 #[test]
 fn test_spake2_compute_weierstrass_y_nil_return() {
-    use p256::FieldElement;
+    use crate::spake2::FieldElement;
     // About half of x values have no quadratic residue. Find one.
     for x_val in 2u64..10_000 {
-        if compute_weierstrass_y(&FieldElement::from_u64(x_val)).is_none() {
+        if compute_weierstrass_y(&FieldElement::from(x_val)).is_none() {
             return;
         }
     }
@@ -152,7 +151,7 @@ fn test_spake2_compute_weierstrass_y_nil_return() {
 /// Port of `TestSPAKE2_HashToCurve_RetryOnZeroX`.
 #[test]
 fn test_spake2_hash_to_curve_retry_on_zero_x() {
-    use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
+    use p256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
     use rand_core::RngCore;
 
     let mut seed = [0u8; 32];
@@ -165,9 +164,9 @@ fn test_spake2_hash_to_curve_retry_on_zero_x() {
             "HashToCurve returned x=0 for seed {}; loop may have terminated early",
             hex::encode(seed)
         );
-        let enc = pt.to_encoded_point(false);
+        let enc = pt.to_sec1_point(false);
         assert!(
-            p256::AffinePoint::from_encoded_point(&enc)
+            p256::AffinePoint::from_sec1_point(&enc)
                 .into_option()
                 .is_some(),
             "HashToCurve returned point not on curve for seed {}",
@@ -393,7 +392,7 @@ fn test_nameplate_different_codes() {
 }
 
 /// Check that `MOD_P` / `ORDER_N` match the `p256` crate's own arithmetic.
-/// The `p256` 0.13 tree does not export the raw modulus/order constants, so
+/// The `p256` 0.14 tree does not export the raw modulus/order constants, so
 /// instead verify that reduction by our constants agrees with p256's native
 /// modular addition on values chosen to force the wrap: (p-2) + 3 == 1 (mod p)
 /// and (N-2) + 3 == 1 (mod N).
@@ -485,4 +484,40 @@ fn test_spake2_session_key_binds_fingerprints() {
     let (ck3, _) = derive_session_key(&shared, b"a", b"b", &FP_A, &FP_E).unwrap();
     assert_eq!(ck1, ck2, "fingerprint order must not change the key");
     assert_ne!(ck1, ck3, "peer fingerprint must be bound into the key");
+}
+
+/// The M and N generators are derived by hash-and-increment, so a change in
+/// the field arithmetic (for example a different square-root root) would
+/// silently break wire compatibility with the Go implementation. Pin the
+/// coordinates produced by the Go reference.
+#[test]
+fn test_spake2_generators_match_go_reference() {
+    let (m, n) = generator_points();
+    let expected = [
+        (
+            "M",
+            m,
+            "e476bf7df49cbba2a13e29cbe1ae225f0e0f8c95449e76fbfe06a5b36c5612d1",
+            "686860816d159579e2d0752eeb32c74a65787ed2b03d055ee0b3fc48968c675b",
+        ),
+        (
+            "N",
+            n,
+            "bf5b68fe008d0487c50f3549e84fbd1496b2974a86219ff4cdb4ca87a79332ed",
+            "b3261fa6d53f9e7e6db06076d2096a37f9b8f5dad57ec408547ea1cc45320859",
+        ),
+    ];
+    for (label, point, want_x, want_y) in expected {
+        let (x, y) = affine_coords(&point);
+        assert_eq!(
+            hex::encode(bytes32::fe_to_bytes(&x)),
+            want_x,
+            "{label}x differs from the Go reference"
+        );
+        assert_eq!(
+            hex::encode(bytes32::fe_to_bytes(&y)),
+            want_y,
+            "{label}y differs from the Go reference"
+        );
+    }
 }

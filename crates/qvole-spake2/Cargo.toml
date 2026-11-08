@@ -9,18 +9,19 @@ description = "SPAKE2 key agreement and shared-code handling (port of qvole spak
 test-util = []
 
 [dependencies]
-# rand_core 0.6 is the same major version that p256/elliptic-curve depend on;
-# pinning it explicitly avoids the classic 0.6/0.9 rand_core mixing trap.
+# rand_core 0.6 supplies the stateless `OsRng` used for ephemeral bytes. The
+# p256 0.14 tree has its own rand_core 0.10 internally, but this crate never
+# passes a caller-supplied RNG into p256, so the two versions do not mix.
 rand_core = { version = "0.6", features = ["std"] }
-p256 = { version = "0.13", features = ["arithmetic", "expose-field"] }
-sha2 = "0.10"
+p256 = { version = "0.14", features = ["arithmetic"] }
+sha2 = "0.11"
 # primeorder is already in the tree via p256; referenced directly for the
 # P-256 `EQUATION_B` curve constant (cross-checked against p256's own value).
-primeorder = "0.13"
-hmac = "0.12"
-hkdf = "0.12"
-pbkdf2 = "0.12"
-aes-gcm = "0.10"
+primeorder = "0.14"
+hmac = "0.13"
+hkdf = "0.13"
+pbkdf2 = "0.13"
+aes-gcm = "0.11"
 zeroize = "1"
 thiserror = "2"
 

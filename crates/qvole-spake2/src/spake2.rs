@@ -17,50 +17,47 @@ use std::sync::OnceLock;
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit, Payload},
+    aead::{Aead, Payload},
 };
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use p256::{
-    AffinePoint, EncodedPoint, FieldElement, NistP256, ProjectivePoint, Scalar, U256,
+    AffinePoint, NistP256, ProjectivePoint, Scalar, Sec1Point, U256,
     elliptic_curve::{
         FieldBytes,
-        bigint::Encoding,
         ff::{Field, PrimeField},
         group::Group,
-        sec1::{FromEncodedPoint, ToEncodedPoint},
+        hazmat::FieldArithmetic,
+        sec1::{FromSec1Point, ToSec1Point},
     },
 };
 
 /// 32-byte big-endian representation shared by P-256 field elements and
-/// scalars. Named via the `elliptic_curve` type alias rather than
-/// `generic_array::GenericArray` directly: the latter is deprecated in the
-/// pinned dependency tree (feature `ga_is_deprecated`) and would trip
-/// `-D warnings`.
+/// scalars. `hybrid_array::Array` (via the `elliptic_curve` alias) is the
+/// byte container used by the RustCrypto 0.14 generation.
 type Bytes32 = FieldBytes<NistP256>;
 
-/// Centralized byte conversions for the `generic-array`-backed P-256 types.
-/// The pinned RustCrypto 0.13 tree marks `generic_array` items deprecated
-/// (cargo feature `ga_is_deprecated`), so every deprecated call site lives
-/// in this module and carries the single scoped `allow`.
+/// P-256 base field element. The concrete type lives in a private module in
+/// `p256` 0.14, so name it through the public `FieldArithmetic` trait.
+pub(crate) type FieldElement = <NistP256 as FieldArithmetic>::FieldElement;
+
+/// Centralized byte conversions for P-256 field and scalar types.
 pub(crate) mod bytes32 {
     use super::*;
 
     /// Field element from a 32-byte big-endian value (panics if >= p).
-    #[allow(deprecated)]
     pub(crate) fn to_fe(b: &[u8]) -> FieldElement {
-        FieldElement::from_repr_vartime(Bytes32::clone_from_slice(b))
+        FieldElement::from_repr_vartime(Bytes32::try_from(b).expect("32-byte value"))
             .expect("field element in range")
     }
 
     /// Scalar from a 32-byte big-endian value (panics if >= N).
-    #[allow(deprecated)]
     pub(crate) fn to_scalar(b: &[u8]) -> Scalar {
-        Scalar::from_repr_vartime(Bytes32::clone_from_slice(b)).expect("scalar in range")
+        Scalar::from_repr_vartime(Bytes32::try_from(b).expect("32-byte value"))
+            .expect("scalar in range")
     }
 
     /// 32-byte big-endian bytes of a field element.
-    #[allow(deprecated)]
     pub(crate) fn fe_to_bytes(f: &FieldElement) -> [u8; 32] {
         f.to_repr().into()
     }
@@ -158,7 +155,7 @@ pub fn hash_to_curve(seed: &[u8]) -> AffinePoint {
 /// (same exponent, same root, as Go).
 pub fn compute_weierstrass_y(x: &FieldElement) -> Option<FieldElement> {
     let x3 = x * x * x;
-    let three_x = FieldElement::from_u64(3) * x;
+    let three_x = FieldElement::from(3u64) * x;
     let rhs = x3 - three_x + COEFF_B;
 
     if rhs.is_zero_vartime() {
@@ -310,8 +307,8 @@ fn base_generator() -> &'static AffinePoint {
             0xe7, 0xeb, 0x4a, 0x7c, 0x0f, 0x9e, 0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e,
             0xce, 0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf, 0x51, 0xf5,
         ];
-        let enc = EncodedPoint::from_bytes(bytes).expect("valid base point encoding");
-        AffinePoint::from_encoded_point(&enc)
+        let enc = Sec1Point::from_bytes(bytes).expect("valid base point encoding");
+        AffinePoint::from_sec1_point(&enc)
             .into_option()
             .expect("base point is on curve")
     })
@@ -327,7 +324,7 @@ fn add_affine(a: &AffinePoint, b: &AffinePoint) -> (FieldElement, FieldElement) 
 /// Extracts the coordinates of an affine point via its SEC1 encoding
 /// (avoids private fields of `p256::AffinePoint`).
 fn affine_xy(p: &AffinePoint) -> (FieldElement, FieldElement) {
-    let enc = p.to_encoded_point(false);
+    let enc = p.to_sec1_point(false);
     let bytes = enc.as_bytes();
     let x = bytes32::to_fe(&bytes[1..33]);
     let y = bytes32::to_fe(&bytes[33..65]);
@@ -397,7 +394,7 @@ impl State {
         };
         let shared = (unblinded * my_scalar).to_affine();
 
-        let enc = shared.to_encoded_point(false);
+        let enc = shared.to_sec1_point(false);
         let bytes = enc.as_bytes();
         let shared_x = bytes32::to_fe(&bytes[1..33]);
         if shared_x.is_zero_vartime() {
@@ -409,12 +406,12 @@ impl State {
 
 /// Parses and validates a peer's 65-byte uncompressed point.
 ///
-/// `from_encoded_point` rejects malformed encodings and points not on the
+/// `from_sec1_point` rejects malformed encodings and points not on the
 /// curve (it verifies the curve equation), matching Go's separate
 /// `elliptic.Unmarshal` + `IsOnCurve` checks.
 fn parse_peer_point(bytes: &[u8]) -> Result<AffinePoint, Error> {
-    let enc = EncodedPoint::from_bytes(bytes).map_err(|_| Error::InvalidPeerPoint)?;
-    AffinePoint::from_encoded_point(&enc)
+    let enc = Sec1Point::from_bytes(bytes).map_err(|_| Error::InvalidPeerPoint)?;
+    AffinePoint::from_sec1_point(&enc)
         .into_option()
         .ok_or(Error::PeerPointOffCurve)
 }
@@ -429,14 +426,14 @@ fn marshal_point((x, y): &(FieldElement, FieldElement)) -> Vec<u8> {
 }
 
 /// Builds an [`AffinePoint`] from raw field coordinates. The point is
-/// re-validated against the curve equation by `from_encoded_point`.
+/// re-validated against the curve equation by `from_sec1_point`.
 pub(crate) fn point_from_xy(x: &FieldElement, y: &FieldElement) -> AffinePoint {
     let mut bytes = [0u8; 65];
     bytes[0] = 0x04;
     bytes[1..33].copy_from_slice(&bytes32::fe_to_bytes(x));
     bytes[33..65].copy_from_slice(&bytes32::fe_to_bytes(y));
-    let enc = EncodedPoint::from_bytes(bytes).expect("valid uncompressed encoding");
-    AffinePoint::from_encoded_point(&enc)
+    let enc = Sec1Point::from_bytes(bytes).expect("valid uncompressed encoding");
+    AffinePoint::from_sec1_point(&enc)
         .into_option()
         .expect("point is on curve by construction")
 }
@@ -592,7 +589,7 @@ pub fn compute_confirm(
     if constant_time_eq(sender_fingerprint, receiver_fingerprint) {
         return Err(Error::ReflectedFingerprint);
     }
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(session_key)
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(session_key)
         .map_err(|e| Error::Hmac(e.to_string()))?;
     let (a, b) = if my_point > peer_point {
         (peer_point, my_point) // public data; variable-time is safe

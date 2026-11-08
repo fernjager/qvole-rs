@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions follow the upstream Go release line.
 
+## [0.2.6] - 2026-11-08
+
+### Security
+
+- Update `p256` to 0.14.0, `elliptic-curve` to 0.14.3, and `crypto-bigint` to
+  0.7.10, clearing RUSTSEC-2026-0387 (secret-dependent branches in operations
+  intended to be constant-time: subtraction, zero counting, division,
+  Montgomery multiplication, and equality). SPAKE2 applies these operations to
+  the password scalar and ephemeral keys.
+- Update `aws-lc-rs` to 1.19.0 (and `aws-lc-sys` to 0.47.0) and
+  `webpki-root-certs` to 1.0.11. OSV reports no advisories for the lockfile.
+
+### Changed
+
+- Move the rest of the RustCrypto stack to the matching generation:
+  `primeorder` 0.14, `sha2` 0.11, `hmac` 0.13, `hkdf` 0.13, `pbkdf2` 0.13, and
+  `aes-gcm` 0.11. The P-256 base field element is named through
+  `elliptic_curve::hazmat::FieldArithmetic`, and SEC1 conversions use the
+  renamed `FromSec1Point`/`ToSec1Point` traits.
+- Add a generator regression test that pins the M/N points to the Go
+  reference, so a future curve-library change cannot silently break wire
+  compatibility.
+- Bump the workspace and binary version to 0.2.6, matching qvole-go v0.2.6.
+
 ## [0.2.5] - 2026-10-26
 
 ### Security
