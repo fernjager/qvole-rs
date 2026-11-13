@@ -20,8 +20,8 @@ use crate::logger::{LOG_HOLE, bold};
 use crate::punch::{PunchOutcome, await_punch, start_hole_punching};
 use crate::role::role_string;
 use crate::transport::{
-    self, HELPER_TICKER_INTERVAL, HELPER_TIMEOUT, KEEPALIVE_PAYLOAD, quic_client_config,
-    quic_server_config,
+    self, CONFIRM_LINGER_PERIOD, CONFIRM_LINGER_TIMEOUT, HELPER_TICKER_INTERVAL, HELPER_TIMEOUT,
+    KEEPALIVE_PAYLOAD, quic_client_config, quic_server_config,
 };
 
 /// Errors from `connect_peer`. Display text mirrors Go's error wrapping.
@@ -149,7 +149,7 @@ async fn connect_inner(
         .local_addr()
         .map_err(|e| ConnectError::DialRelay(e.to_string()))?;
 
-    let (peer_addr_str, peer_fingerprint, is_server) =
+    let (peer_addr_str, peer_fingerprint, is_server, confirm_msg) =
         exchange::register_and_exchange(cancel, &exchange_sock, &room, &code, &my_fingerprint, cfg)
             .await?;
     drop(exchange_sock);
@@ -159,6 +159,17 @@ async fn connect_inner(
     let (quic_std_sock, quic_sock) =
         rebind_udp(local_addr).map_err(|e| ConnectError::Rebind(e.to_string()))?;
     let quic_sock = Arc::new(quic_sock);
+
+    // The peer may still be waiting for our confirm: we stop answering the
+    // moment its confirm arrives, so if our last confirm was lost the peer
+    // would time out. Keep resending it via the relay from the same local
+    // port (the relay still sees our registered address) until we connect.
+    linger_confirm(
+        helper_cancel,
+        Arc::clone(&quic_sock),
+        relay_udp_addr,
+        confirm_msg,
+    );
 
     let mut peer_udp_addr: SocketAddr = peer_addr_str
         .parse()
@@ -180,8 +191,12 @@ async fn connect_inner(
     ));
 
     let punch_cancel = cancel.child_token();
-    let (rx, punch_handle) =
-        start_hole_punching(&punch_cancel, Arc::clone(&quic_sock), peer_udp_addr);
+    let (rx, punch_handle) = start_hole_punching(
+        &punch_cancel,
+        Arc::clone(&quic_sock),
+        peer_udp_addr,
+        Some(relay_udp_addr),
+    );
     let outcome = await_punch(rx, cfg.punch_timeout()).await;
 
     match outcome {
@@ -369,6 +384,37 @@ async fn dial_quic(
         ConnectError::Dial(e.to_string())
     })?;
     Ok(conn)
+}
+
+/// Go `lingerConfirm`: resends our matching confirm to the relay every
+/// `CONFIRM_LINGER_PERIOD` for up to `CONFIRM_LINGER_TIMEOUT` (or until
+/// `cancel`, i.e. `connect_peer` returns), so a peer whose copy was lost can
+/// still finish the exchange. Duplicates are harmless: a peer that already
+/// finished has left the room or ignores them.
+fn linger_confirm(
+    cancel: &CancellationToken,
+    sock: Arc<UdpSocket>,
+    relay: SocketAddr,
+    msg: Vec<u8>,
+) -> tokio::task::JoinHandle<()> {
+    let cancel = cancel.clone();
+    tokio::spawn(async move {
+        if msg.is_empty() {
+            return;
+        }
+        let mut ticker = tokio::time::interval(CONFIRM_LINGER_PERIOD);
+        let stop = tokio::time::sleep(CONFIRM_LINGER_TIMEOUT);
+        tokio::pin!(stop);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = &mut stop => return,
+                _ = ticker.tick() => {
+                    let _ = sock.send_to(&msg, relay).await; // best-effort
+                }
+            }
+        }
+    })
 }
 
 /// Go `helper`: for `HELPER_TIMEOUT` after the punch, sends a 1-byte probe

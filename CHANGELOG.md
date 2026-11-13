@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versions follow the upstream Go release line.
 
+## [0.2.7] - 2026-11-13
+
+### Security
+
+- Cap SPAKE2 candidates at 8 per exchange with no eviction, aborting on the
+  next new point; each answered point was an online guess at the code.
+- Update `rustls-webpki` to 0.103.17, `rustls-pki-types` to 1.16.0, and
+  `crypto-bigint` to 0.7.11. `cargo audit` reports no advisories.
+
+### Fixed
+
+- Keep resending the matching SPAKE2 confirm via the relay after the
+  exchange, so a lost final confirm no longer fails the session after 90 s.
+- Ignore the relay's own address during hole punching, so a relay sharing the
+  peer's IP is no longer mistaken for the peer.
+
+### Changed
+
+- Update `const-oid`, `errno`, `syn`, and `webpki-root-certs` patch releases,
+  and track qvole-go v0.2.7.
+
 ## [0.2.6] - 2026-11-08
 
 ### Security

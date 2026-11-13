@@ -25,7 +25,11 @@ use crate::logger::{LOG_RELAY, LOG_SPAKE2, bold};
 pub const POINT_LEN: usize = 65;
 pub const FINGERPRINT_SIZE: usize = 32;
 pub const SPAKE2_PAYLOAD_LEN: usize = POINT_LEN * 2 + FINGERPRINT_SIZE; // 162
-pub const MAX_CANDIDATES: usize = 50;
+/// Bounds online password guessing (Go `maxCandidates`). Every distinct
+/// SPAKE2 point answered with a confirm gives its sender one
+/// offline-checkable guess at the code, so candidates are never evicted:
+/// once the table is full, the next new point aborts the exchange.
+pub const MAX_CANDIDATES: usize = 8;
 pub const MAX_BUFFERED_CONFIRMS: usize = 200;
 /// Bound on inbound `MSGD` work per second (Go `maxInboundMSGDPerSecond`).
 pub const MAX_INBOUND_MSGD_PER_SECOND: usize = 500;
@@ -219,6 +223,11 @@ pub enum ExchangeError {
     /// Go `context.Canceled`.
     #[error("context canceled")]
     Cancelled,
+    /// Go `errTooManyCandidates`.
+    #[error(
+        "too many SPAKE2 peers in room (possible code-guessing attempt); retry with a new code"
+    )]
+    TooManyCandidates,
 }
 
 /// Trims ASCII whitespace (Go `bytes.TrimSpace`).
@@ -464,20 +473,15 @@ impl CandidatesGuard {
         self.0.insert(k, v);
     }
 
-    fn remove(&mut self, k: &str) {
-        if let Some(mut cand) = self.0.remove(k) {
-            spake2::zero_bytes(&mut cand.confirm_key);
-            spake2::zero_bytes(&mut cand.enc_key);
-        }
-    }
-
     fn iter(&self) -> impl Iterator<Item = (&String, &PeerCandidate)> {
         self.0.iter()
     }
 }
 
 /// Registers the peer in the room and completes the SPAKE2 exchange,
-/// returning `(peerAddr, peerFingerprint, isServer)`.
+/// returning `(peerAddr, peerFingerprint, isServer, confirmMsg)`. On success
+/// `confirmMsg` is the relay-ready confirm that matched, which the caller
+/// keeps resending (see `linger_confirm`) in case the peer missed it.
 ///
 /// Port of `registerAndExchange`.
 pub async fn register_and_exchange(
@@ -487,7 +491,7 @@ pub async fn register_and_exchange(
     code: &str,
     my_fingerprint: &[u8],
     cfg: &PeerConfig,
-) -> Result<(String, Vec<u8>, bool), ExchangeError> {
+) -> Result<(String, Vec<u8>, bool, Vec<u8>), ExchangeError> {
     let state = spake2::new_state(code)?;
     let state = StateGuard(state);
     let my_point_m = state.0.blinded_bytes_m();
@@ -658,6 +662,14 @@ pub async fn register_and_exchange(
                     continue;
                 }
             };
+            if candidates.len() >= MAX_CANDIDATES {
+                // Abort rather than evict: answering this point would hand
+                // its sender another guess at the code. Only validated
+                // points reach here, so malformed payloads cannot trigger it.
+                spake2::zero_bytes(&mut proc.confirm_key);
+                spake2::zero_bytes(&mut proc.enc_key);
+                return Err(ExchangeError::TooManyCandidates);
+            }
             let cp = match build_confirm_payload(
                 &proc.confirm_key,
                 &proc.enc_key,
@@ -675,19 +687,6 @@ pub async fn register_and_exchange(
                     continue;
                 }
             };
-            if candidates.len() >= MAX_CANDIDATES {
-                let evict_key = candidates
-                    .iter()
-                    .min_by_key(|(k, _)| confirm_last_sent.get(*k).copied())
-                    .map(|(k, _)| k.clone());
-                if let Some(k) = evict_key {
-                    candidates.remove(&k);
-                    confirm_last_sent.remove(&k);
-                    LOG_SPAKE2.printf(&format!(
-                        "SPAKE2 candidate table full ({MAX_CANDIDATES}), evicting oldest"
-                    ));
-                }
-            }
             candidates.insert(
                 payload_key.clone(),
                 PeerCandidate {
@@ -718,7 +717,13 @@ pub async fn register_and_exchange(
                     &proc.peer_fingerprint,
                 ) {
                     LOG_SPAKE2.printf_success("Peer authenticated (buffered)");
-                    return Ok((pa, proc.peer_fingerprint, proc.is_server));
+                    let linger = format!("MSG {room} confirm {}\n", hex::to_hex_lower(&cp));
+                    return Ok((
+                        pa,
+                        proc.peer_fingerprint,
+                        proc.is_server,
+                        linger.into_bytes(),
+                    ));
                 }
             }
         }
@@ -741,7 +746,16 @@ pub async fn register_and_exchange(
                     Err(_) => continue 'candidates,
                 };
                 LOG_SPAKE2.printf_success("Peer authenticated");
-                return Ok((pa, cand.fingerprint.clone(), cand.is_server));
+                let linger = format!(
+                    "MSG {room} confirm {}\n",
+                    hex::to_hex_lower(&cand.confirm_payload)
+                );
+                return Ok((
+                    pa,
+                    cand.fingerprint.clone(),
+                    cand.is_server,
+                    linger.into_bytes(),
+                ));
             }
 
             if buffered_confirms.len() < MAX_BUFFERED_CONFIRMS {

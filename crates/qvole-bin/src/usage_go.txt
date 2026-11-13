@@ -1,4 +1,4 @@
-qvole 0.2.6: Fast tunnels over QUIC, burrowed through NATs.
+qvole 0.2.7: Fast tunnels over QUIC, burrowed through NATs.
 
 Commands:
 

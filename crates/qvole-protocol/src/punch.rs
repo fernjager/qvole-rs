@@ -29,7 +29,10 @@ pub const PUNCH_PAYLOAD_SIZES: [usize; 4] = [5, 50, 100, 200];
 ///
 /// `peer_ip = None` accepts from anyone. The IP filter is relaxed on the
 /// port for symmetric NATs (documented in Go). Every non-matching packet is
-/// consumed, like Go's `ReadFromUDP`.
+/// consumed, like Go's `ReadFromUDP`. Datagrams from `relay` itself are
+/// skipped: when the relay shares the peer's IP (a self-hosted relay behind
+/// the peer's NAT, or loopback testing), its forwarded MSGDs would otherwise
+/// count as a punch and "correct" the peer port to the relay's.
 ///
 /// Note: like Go, this leaves a 100 ms read deadline set on `sock` when it
 /// returns; the caller clears it before handing the socket to QUIC
@@ -38,6 +41,7 @@ pub async fn listen_for_punch(
     cancel: &CancellationToken,
     sock: &UdpSocket,
     peer_ip: Option<std::net::IpAddr>,
+    relay: Option<std::net::SocketAddr>,
     tx: mpsc::Sender<std::net::SocketAddr>,
 ) -> std::io::Result<()> {
     let mut buf = vec![0u8; PUNCH_BUFFER_SIZE];
@@ -62,6 +66,9 @@ pub async fn listen_for_punch(
         {
             continue;
         }
+        if relay == Some(from) {
+            continue;
+        }
         LOG_HOLE.printf(&format!("Punch packet received from {from}"));
         let _ = tx.try_send(from);
         return Ok(());
@@ -80,6 +87,7 @@ pub fn start_hole_punching(
     cancel: &CancellationToken,
     sock: std::sync::Arc<UdpSocket>,
     peer_addr: std::net::SocketAddr,
+    relay_addr: Option<std::net::SocketAddr>,
 ) -> (
     tokio::sync::oneshot::Receiver<Option<std::net::SocketAddr>>,
     tokio::task::JoinHandle<()>,
@@ -102,7 +110,14 @@ pub fn start_hole_punching(
         let (punch_tx, mut punch_rx) = mpsc::channel::<std::net::SocketAddr>(1);
         let listener_sock = std::sync::Arc::clone(&sock);
         let listener = tokio::spawn(async move {
-            listen_for_punch(&listener_cancel, &listener_sock, peer_ip, punch_tx).await
+            listen_for_punch(
+                &listener_cancel,
+                &listener_sock,
+                peer_ip,
+                relay_addr,
+                punch_tx,
+            )
+            .await
         });
 
         let mut interval_idx = 0usize;

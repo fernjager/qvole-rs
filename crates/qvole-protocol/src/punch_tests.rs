@@ -19,7 +19,8 @@ async fn listen_for_punch_receives_from_correct_peer() {
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
     let l2 = std::sync::Arc::clone(&listener);
-    let task = tokio::spawn(async move { listen_for_punch(&cancel2, &l2, peer_ip, tx).await });
+    let task =
+        tokio::spawn(async move { listen_for_punch(&cancel2, &l2, peer_ip, None, tx).await });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     sender
@@ -47,7 +48,7 @@ async fn listen_for_punch_accepts_same_ip_different_port() {
     let cancel2 = cancel.clone();
     let l2 = std::sync::Arc::clone(&listener);
     let task =
-        tokio::spawn(async move { listen_for_punch(&cancel2, &l2, Some(peer_ip), tx).await });
+        tokio::spawn(async move { listen_for_punch(&cancel2, &l2, Some(peer_ip), None, tx).await });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     wrong_sender
@@ -73,7 +74,7 @@ async fn listen_for_punch_nil_peer_addr() {
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
     let l2 = std::sync::Arc::clone(&listener);
-    let task = tokio::spawn(async move { listen_for_punch(&cancel2, &l2, None, tx).await });
+    let task = tokio::spawn(async move { listen_for_punch(&cancel2, &l2, None, None, tx).await });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     sender
@@ -96,7 +97,7 @@ async fn listen_for_punch_context_cancel() {
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
     let l2 = std::sync::Arc::clone(&listener);
-    let task = tokio::spawn(async move { listen_for_punch(&cancel2, &l2, None, _tx).await });
+    let task = tokio::spawn(async move { listen_for_punch(&cancel2, &l2, None, None, _tx).await });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     cancel.cancel();
@@ -116,7 +117,7 @@ async fn listen_for_punch_zero_length_packet() {
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
     let l2 = std::sync::Arc::clone(&listener);
-    let task = tokio::spawn(async move { listen_for_punch(&cancel2, &l2, None, tx).await });
+    let task = tokio::spawn(async move { listen_for_punch(&cancel2, &l2, None, None, tx).await });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     // Zero-length packet must be ignored (Go: n <= 0 continue).
@@ -152,7 +153,8 @@ async fn listen_for_punch_non_timeout_read_error() {
     let (_tx, _rx) = mpsc::channel::<std::net::SocketAddr>(1);
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
-    let task = tokio::spawn(async move { listen_for_punch(&cancel2, &listener, None, _tx).await });
+    let task =
+        tokio::spawn(async move { listen_for_punch(&cancel2, &listener, None, None, _tx).await });
 
     tokio::time::sleep(Duration::from_millis(150)).await;
     cancel.cancel();
@@ -170,7 +172,7 @@ async fn start_hole_punching_sends_packets() {
     let peer_addr = receiver.local_addr().unwrap();
 
     let cancel = CancellationToken::new();
-    let (rx, _handle) = start_hole_punching(&cancel, puncher, peer_addr);
+    let (rx, _handle) = start_hole_punching(&cancel, puncher, peer_addr, None);
 
     let mut buf = vec![0u8; PUNCH_BUFFER_SIZE];
     let n = tokio::time::timeout(Duration::from_secs(2), receiver.recv_from(&mut buf))
@@ -190,7 +192,7 @@ async fn start_hole_punching_context_cancel() {
     let peer_addr = _receiver.local_addr().unwrap();
 
     let cancel = CancellationToken::new();
-    let (rx, handle) = start_hole_punching(&cancel, puncher, peer_addr);
+    let (rx, handle) = start_hole_punching(&cancel, puncher, peer_addr, None);
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     cancel.cancel();
@@ -224,7 +226,7 @@ async fn start_hole_punching_detects_peer() {
         }
     });
 
-    let (rx, _handle) = start_hole_punching(&cancel, puncher, peer_addr);
+    let (rx, _handle) = start_hole_punching(&cancel, puncher, peer_addr, None);
     match tokio::time::timeout(Duration::from_secs(5), rx).await {
         Ok(Ok(Some(addr))) => {
             assert_eq!(addr.ip(), peer_addr.ip());
@@ -233,4 +235,44 @@ async fn start_hole_punching_detects_peer() {
     }
     cancel.cancel();
     let _ = reply_task.await;
+}
+
+/// Regression test for port correction onto the relay (Go
+/// `TestListenForPunch_IgnoresRelaySameIP`): with the relay on the peer's
+/// IP, forwarded MSGDs must not count as a punch.
+#[tokio::test]
+async fn listen_for_punch_ignores_relay_same_ip() {
+    let listener = Arc::new(new_udp().await);
+    let relay = new_udp().await;
+    let peer = new_udp().await;
+    let relay_addr = relay.local_addr().unwrap();
+    let peer_addr = peer.local_addr().unwrap();
+
+    let (tx, mut rx) = mpsc::channel::<std::net::SocketAddr>(1);
+    let cancel = CancellationToken::new();
+    let cancel2 = cancel.clone();
+    let l2 = Arc::clone(&listener);
+    let task = tokio::spawn(async move {
+        listen_for_punch(&cancel2, &l2, Some(peer_addr.ip()), Some(relay_addr), tx).await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    relay
+        .send_to(b"MSGD spake2 00\n", listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    peer.send_to(b"punch", listener.local_addr().unwrap())
+        .await
+        .unwrap();
+
+    match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(got)) => assert_eq!(
+            got, peer_addr,
+            "punch attributed to {got}; relay {relay_addr} must be ignored"
+        ),
+        _ => panic!("did not receive punch from peer"),
+    }
+    cancel.cancel();
+    let _ = task.await;
 }

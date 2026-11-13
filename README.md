@@ -28,7 +28,7 @@ This port is wire-compatible with the Go implementation and mirrors its layout
 module for module. It targets Linux and macOS; Windows is not supported.
 
 Initial baseline: qvole-go
-[`v0.2.6`](https://github.com/fernjager/qvole/releases/tag/v0.2.6).
+[`v0.2.7`](https://github.com/fernjager/qvole/releases/tag/v0.2.7).
 
 ## Quick Start
 
@@ -186,7 +186,7 @@ serial, which is not observable under fingerprint pinning.
 
 ### Behavioral differences from the pinned Go reference
 
-As of the v0.2.6 baseline, the relay hardening, `exec` stdin half-close,
+As of the v0.2.7 baseline, the relay hardening, `exec` stdin half-close,
 `PasswordToScalar`, `pipe` stats teardown, and atomic `Debug` fixes are present
 in both implementations, so they are no longer differences.
 
@@ -249,7 +249,7 @@ value. The points below are relative to the **pinned reference commit** above.
   wire change.
 - **Lockstep maintenance.** The port tracks a pinned Go commit, so protocol or
   behavior changes must be carried across both codebases by hand. At the
-  v0.2.6 baseline the two are behaviorally aligned except for the
+  v0.2.7 baseline the two are behaviorally aligned except for the
   stream-announcement asymmetry above.
 
 In short: prefer the Go implementation for cross-platform use, prebuilt

@@ -693,3 +693,83 @@ fn fingerprint_substitution_is_rejected() {
         .is_ok()
     );
 }
+
+/// Regression test for online guess amplification (Go
+/// `TestRegisterAndExchange_CandidateCapBoundsGuesses`): each distinct point
+/// answered with a confirm is one offline-checkable guess at the code, so a
+/// flood must yield at most `MAX_CANDIDATES` confirms and then abort, never
+/// evict and keep answering.
+#[tokio::test]
+async fn register_and_exchange_candidate_cap_bounds_guesses() {
+    use rand::RngCore;
+
+    const ROOM: &str = "capt";
+    let relay = bind_udp().await;
+    let peer = bind_udp().await;
+    peer.connect(relay.local_addr().unwrap()).await.unwrap();
+
+    // One wrong-code state supplies valid points; the exchange dedups by the
+    // full payload, so distinct fingerprints make distinct candidates without
+    // paying PBKDF2 per payload.
+    let guess = spake2::new_state("attacker-guess-code").unwrap();
+    let points = [guess.blinded_bytes_m(), guess.blinded_bytes_n()].concat();
+
+    let cancel = CancellationToken::new();
+    let exchange = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            register_and_exchange(
+                &cancel,
+                &peer,
+                ROOM,
+                "candidate-cap-test-code",
+                &[7u8; FINGERPRINT_SIZE],
+                &PeerConfig::default(),
+            )
+            .await
+        }
+    });
+
+    let mut confirms = std::collections::HashSet::new();
+    let mut flooded = false;
+    let mut buf = vec![0u8; READ_BUFFER_SIZE];
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !exchange.is_finished() && Instant::now() < deadline {
+        let Ok(Ok((n, src))) =
+            tokio::time::timeout(Duration::from_millis(200), relay.recv_from(&mut buf)).await
+        else {
+            continue;
+        };
+        let line = std::str::from_utf8(&buf[..n])
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if line.starts_with("REG ") {
+            let resp = format!("REGD {ROOM} OK {src}\n");
+            let _ = relay.send_to(resp.as_bytes(), src).await;
+        } else if let Some(c) = line.strip_prefix(&format!("MSG {ROOM} confirm ")) {
+            confirms.insert(c.to_string());
+        } else if line.starts_with(&format!("MSG {ROOM} spake2 ")) && !flooded {
+            flooded = true;
+            for _ in 0..MAX_CANDIDATES * 4 {
+                let mut fp = [0u8; FINGERPRINT_SIZE];
+                rand::rngs::OsRng.fill_bytes(&mut fp);
+                let payload = [points.as_slice(), &fp].concat();
+                let msg = format!("MSGD spake2 {}\n", hex::to_hex_lower(&payload));
+                let _ = relay.send_to(msg.as_bytes(), src).await;
+            }
+        }
+    }
+    cancel.cancel();
+
+    let err = exchange.await.unwrap().unwrap_err();
+    assert!(
+        matches!(err, ExchangeError::TooManyCandidates),
+        "expected TooManyCandidates, got {err}"
+    );
+    assert!(
+        confirms.len() <= MAX_CANDIDATES,
+        "answered {} distinct points; cap is {MAX_CANDIDATES}",
+        confirms.len()
+    );
+}

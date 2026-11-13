@@ -38,6 +38,11 @@ pub const CANCEL_ERROR_CODE: u32 = 1;
 pub const STREAM_CLOSE_DELAY: Duration = Duration::from_millis(500);
 /// Go `helperTimeout`: how long the post-punch keep-alive helper runs.
 pub const HELPER_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long to keep resending the matched confirm after the exchange (Go
+/// `confirmLingerTimeout`).
+pub const CONFIRM_LINGER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Resend period for the lingering confirm (Go `confirmLingerPeriod`).
+pub const CONFIRM_LINGER_PERIOD: Duration = Duration::from_millis(500);
 /// Go `helperTickerInterval`.
 pub const HELPER_TICKER_INTERVAL: Duration = Duration::from_millis(50);
 /// Go `keepalivePayload`: tiny UDP probe sent while the NAT mapping is
